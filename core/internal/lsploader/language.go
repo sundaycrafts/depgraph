@@ -15,7 +15,6 @@ type LanguageMeta struct {
 	FileExts    []string // source file extensions to collect for analysis
 	LSPBinary   string   // language server executable name
 	LSPArgs     []string // arguments passed to the language server process
-	SkipDirs    []string // directory names to skip when walking the tree
 	InstallHint string   // shown in error messages when the binary is missing
 }
 
@@ -28,7 +27,6 @@ var meta = map[Language]LanguageMeta{
 		FileExts:    []string{".go"},
 		LSPBinary:   "gopls",
 		LSPArgs:     []string{"-mode=stdio"},
-		SkipDirs:    []string{"vendor"},
 		InstallHint: "go install golang.org/x/tools/gopls@latest",
 	},
 	Rust: {
@@ -36,7 +34,6 @@ var meta = map[Language]LanguageMeta{
 		FileExts:    []string{".rs"},
 		LSPBinary:   "rust-analyzer",
 		LSPArgs:     []string{},
-		SkipDirs:    []string{"target"},
 		InstallHint: "rustup component add rust-analyzer",
 	},
 	TypeScript: {
@@ -44,7 +41,6 @@ var meta = map[Language]LanguageMeta{
 		FileExts:    []string{".ts", ".tsx"},
 		LSPBinary:   "typescript-language-server",
 		LSPArgs:     []string{"--stdio"},
-		SkipDirs:    []string{"node_modules"},
 		InstallHint: "npm install -g typescript-language-server typescript",
 	},
 }

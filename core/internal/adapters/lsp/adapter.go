@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/google/uuid"
 	"github.com/sundaycrafts/depgraph/internal/domain"
 	"github.com/sundaycrafts/depgraph/internal/lsploader"
@@ -20,7 +21,8 @@ import (
 // It auto-detects supported languages in the target directory and dispatches
 // to the appropriate language server for each.
 type Adapter struct {
-	locator lsploader.Locator
+	locator  lsploader.Locator
+	excludes []string
 }
 
 var _ ports.AnalyzerPort = (*Adapter)(nil)
@@ -31,6 +33,12 @@ type Option func(*Adapter)
 // WithLocator overrides the binary locator (used in tests).
 func WithLocator(loc lsploader.Locator) Option {
 	return func(a *Adapter) { a.locator = loc }
+}
+
+// WithExcludeGlobs sets glob patterns (matched against paths relative to the
+// analysis root) that exclude files and directories from the walk.
+func WithExcludeGlobs(globs ...string) Option {
+	return func(a *Adapter) { a.excludes = append(a.excludes, globs...) }
 }
 
 // New creates an Adapter that resolves language server binaries via exec.LookPath.
@@ -113,7 +121,7 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		return fmt.Errorf("initialized: %w", err)
 	}
 
-	files, err := findFiles(root, m.FileExts, m.SkipDirs)
+	files, err := findFiles(root, m.FileExts, a.excludes)
 	if err != nil {
 		return fmt.Errorf("find files: %w", err)
 	}
@@ -363,28 +371,52 @@ func getReferences(c *conn, docURI URI, pos Position) ([]Location, error) {
 	return locs, err
 }
 
-// findFiles walks root and collects files whose extension matches any of exts,
-// skipping directories named in skipDirs and all dot-directories.
-func findFiles(root string, exts []string, skipDirs []string) ([]string, error) {
-	skip := make(map[string]bool, len(skipDirs))
-	for _, d := range skipDirs {
-		skip[d] = true
-	}
-
+// findFiles walks root and collects files whose extension matches any of exts.
+// Dot files and dot directories (other than root itself) are always skipped.
+// The excludes slice contains doublestar glob patterns matched against paths
+// relative to root; matched files and directories are skipped.
+func findFiles(root string, exts, excludes []string) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && (skip[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
-			return filepath.SkipDir
+		// Always skip dot entries (except root, when root itself is ".").
+		if d.Name() != "." && strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
-		if !d.IsDir() {
-			for _, ext := range exts {
-				if strings.HasSuffix(path, ext) {
-					files = append(files, path)
-					break
+
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+
+		for _, p := range excludes {
+			ok, mErr := doublestar.PathMatch(p, rel)
+			if mErr != nil {
+				return fmt.Errorf("invalid exclude pattern %q: %w", p, mErr)
+			}
+			if ok {
+				if d.IsDir() {
+					return filepath.SkipDir
 				}
+				return nil
+			}
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+		for _, ext := range exts {
+			if strings.HasSuffix(path, ext) {
+				files = append(files, path)
+				break
 			}
 		}
 		return nil

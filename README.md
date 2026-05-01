@@ -52,7 +52,7 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 |---|---|
 | `make gen` | Regenerate `core/gen/api.gen.go` and `web/src/gen/api.ts` from `api/openapi.yaml` |
 | `make build` | Production build — outputs a single Go binary with the web SPA embedded |
-| `make dev TARGET_DIR=<path>` | Start Go server (`:8080`) and Vite dev server (`:5173`) in parallel |
+| `make dev TARGET_DIR=<path> [DEPGRAPH_ARGS='...']` | Start Go server (`:8080`) and Vite dev server (`:5173`) in parallel |
 | `make test` | Run `go test ./...` and `npm test` |
 
 ---
@@ -75,10 +75,25 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 make dev TARGET_DIR=/path/to/project
 
 # Production binary
-depgraph <target-dir>
+depgraph <target-dir> [--exclude <glob>]...
 ```
 
 Analyzes `<target-dir>` via LSP, starts a local HTTP server, and opens the graph in your browser.
+
+### Excluding files
+
+`--exclude` accepts [doublestar](https://github.com/bmatcuk/doublestar) glob patterns matched against paths relative to `<target-dir>`. The flag is repeatable. Hidden entries (starting with `.`) are always skipped; everything else must be excluded explicitly.
+
+```sh
+# Skip Go test files and the vendor tree
+depgraph ./core --exclude='**/*_test.go' --exclude='vendor/**'
+
+# TypeScript: skip node_modules and *.test.ts / *.spec.ts
+depgraph ./web --exclude='node_modules/**' --exclude='**/*.test.ts' --exclude='**/*.spec.ts'
+
+# Through the Makefile
+make dev TARGET_DIR=$PWD/core DEPGRAPH_ARGS='--exclude=**/*_test.go --exclude=vendor/**'
+```
 
 ---
 

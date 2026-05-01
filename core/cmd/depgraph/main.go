@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,17 +19,32 @@ import (
 
 var version = "dev"
 
+// stringSlice collects repeatable flag values.
+type stringSlice []string
+
+func (s *stringSlice) String() string     { return strings.Join(*s, ",") }
+func (s *stringSlice) Set(v string) error { *s = append(*s, v); return nil }
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: depgraph <target-dir>")
+	var excludes stringSlice
+	flag.Var(&excludes, "exclude", "glob pattern relative to <target-dir> to exclude (repeatable)")
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: depgraph <target-dir> [--exclude <glob>]...")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+
+	args := flag.Args()
+	if len(args) < 1 {
+		flag.Usage()
 		os.Exit(1)
 	}
+	root := args[0]
 
-	root := os.Args[1]
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	analyzer := lspadapter.New()
+	analyzer := lspadapter.New(lspadapter.WithExcludeGlobs(excludes...))
 	editor := fsadapter.New(root)
 
 	graph, err := analyzer.Analyze(ctx, root)

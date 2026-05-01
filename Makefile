@@ -13,8 +13,10 @@ build: gen
 	cp -r $(WEB_DIST)/. $(STATIC_DIR)/
 	cd core && go build -o bin/depgraph ./cmd/depgraph
 
+DEPGRAPH_ARGS ?=
+
 dev:
-	cd core && go run ./cmd/depgraph $(TARGET_DIR) & \
+	cd core && go run ./cmd/depgraph $(TARGET_DIR) $(DEPGRAPH_ARGS) & \
 	# arbitrary wait for the backend to start
 	sleep 3 && \
 	cd web && npm run dev
