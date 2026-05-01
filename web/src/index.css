@@ -3,3 +3,8 @@
 body {
   margin: 0;
 }
+
+.dp-range-highlight {
+  background-color: rgba(255, 215, 0, 0.35);
+  border-radius: 2px;
+}

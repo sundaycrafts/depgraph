@@ -14,7 +14,7 @@ build: gen
 	cd core && go build -o bin/depgraph ./cmd/depgraph
 
 dev:
-	cd core && go run ./cmd/depgraph & \
+	cd core && go run ./cmd/depgraph $(TARGET_DIR) & \
 	cd web && npm run dev
 
 test:

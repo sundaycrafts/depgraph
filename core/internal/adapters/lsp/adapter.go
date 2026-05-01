@@ -12,26 +12,34 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sundaycrafts/depgraph/internal/domain"
+	"github.com/sundaycrafts/depgraph/internal/lsploader"
 	"github.com/sundaycrafts/depgraph/internal/ports"
 )
 
 // Adapter implements ports.AnalyzerPort via the Language Server Protocol.
-// It manages the LSP server process lifecycle and validates all JSON-RPC responses
-// before converting them to domain types.
+// It auto-detects supported languages in the target directory and dispatches
+// to the appropriate language server for each.
 type Adapter struct {
-	serverCmd string
+	locator lsploader.Locator
 }
 
 var _ ports.AnalyzerPort = (*Adapter)(nil)
 
-// New creates an Adapter using gopls as the language server.
-func New() *Adapter {
-	return &Adapter{serverCmd: "gopls"}
+// Option configures the Adapter.
+type Option func(*Adapter)
+
+// WithLocator overrides the binary locator (used in tests).
+func WithLocator(loc lsploader.Locator) Option {
+	return func(a *Adapter) { a.locator = loc }
 }
 
-// NewWithServer creates an Adapter with a custom language server command (for testing).
-func NewWithServer(cmd string) *Adapter {
-	return &Adapter{serverCmd: cmd}
+// New creates an Adapter that resolves language server binaries via exec.LookPath.
+func New(opts ...Option) *Adapter {
+	a := &Adapter{locator: ExecLocator{}}
+	for _, o := range opts {
+		o(a)
+	}
+	return a
 }
 
 func (a *Adapter) Analyze(ctx context.Context, root string) (domain.Graph, error) {
@@ -40,27 +48,53 @@ func (a *Adapter) Analyze(ctx context.Context, root string) (domain.Graph, error
 		return domain.Graph{}, fmt.Errorf("resolve root: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, a.serverCmd, "-mode=stdio")
+	langs, err := lsploader.Detect(absRoot)
+	if err != nil {
+		return domain.Graph{}, fmt.Errorf("detect languages: %w", err)
+	}
+	if len(langs) == 0 {
+		return domain.Graph{}, fmt.Errorf(
+			"no supported languages detected in %s (expected go.mod, Cargo.toml, or tsconfig.json)",
+			absRoot,
+		)
+	}
+
+	if err := lsploader.Check(a.locator, langs); err != nil {
+		return domain.Graph{}, err
+	}
+
+	gb := newGraphBuilder()
+	for _, lang := range langs {
+		if err := a.analyzeWithLSP(ctx, absRoot, lang, gb); err != nil {
+			return domain.Graph{}, fmt.Errorf("analyze %s: %w", lang, err)
+		}
+	}
+	return gb.build(), nil
+}
+
+func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploader.Language, gb *graphBuilder) error {
+	m := lsploader.Meta(lang)
+
+	cmd := exec.CommandContext(ctx, m.LSPBinary, m.LSPArgs...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return domain.Graph{}, fmt.Errorf("stdin pipe: %w", err)
+		return fmt.Errorf("stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return domain.Graph{}, fmt.Errorf("stdout pipe: %w", err)
+		return fmt.Errorf("stdout pipe: %w", err)
 	}
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		return domain.Graph{}, fmt.Errorf("start %s: %w", a.serverCmd, err)
+		return fmt.Errorf("start %s: %w", m.LSPBinary, err)
 	}
 	defer cmd.Process.Kill() //nolint:errcheck
 
 	c := newConn(stdout, stdin)
 	go c.readLoop() //nolint:errcheck
 
-	// Initialize LSP session.
-	rootURI := fileURI(absRoot)
+	rootURI := fileURI(root)
 	var initResult InitializeResult
 	if err := c.call("initialize", InitializeParams{
 		ProcessID: os.Getpid(),
@@ -73,27 +107,24 @@ func (a *Adapter) Analyze(ctx context.Context, root string) (domain.Graph, error
 			},
 		},
 	}, &initResult); err != nil {
-		return domain.Graph{}, fmt.Errorf("initialize: %w", err)
+		return fmt.Errorf("initialize: %w", err)
 	}
 	if err := c.notify("initialized", map[string]any{}); err != nil {
-		return domain.Graph{}, fmt.Errorf("initialized: %w", err)
+		return fmt.Errorf("initialized: %w", err)
 	}
 
-	// Walk root for Go source files.
-	goFiles, err := findGoFiles(absRoot)
+	files, err := findFiles(root, m.FileExts, m.SkipDirs)
 	if err != nil {
-		return domain.Graph{}, fmt.Errorf("find go files: %w", err)
+		return fmt.Errorf("find files: %w", err)
 	}
 
-	gb := newGraphBuilder()
-
-	for _, file := range goFiles {
-		fileURI := fileURI(file)
+	for _, file := range files {
+		docURI := fileURI(file)
 		fileID := gb.addFileNode(file)
 
 		var raw symbolResult
 		if err := c.call("textDocument/documentSymbol", DocumentSymbolParams{
-			TextDocument: TextDocumentIdentifier{URI: fileURI},
+			TextDocument: TextDocumentIdentifier{URI: docURI},
 		}, &raw); err != nil {
 			// Non-fatal: skip files the server can't parse.
 			continue
@@ -111,7 +142,7 @@ func (a *Adapter) Analyze(ctx context.Context, root string) (domain.Graph, error
 			if !initResult.Capabilities.ReferencesProvider {
 				continue
 			}
-			refs, err := getReferences(c, fileURI, sym.SelectionRange.Start)
+			refs, err := getReferences(c, docURI, sym.SelectionRange.Start)
 			if err != nil {
 				continue
 			}
@@ -122,15 +153,14 @@ func (a *Adapter) Analyze(ctx context.Context, root string) (domain.Graph, error
 			}
 		}
 	}
-
-	return gb.build(), nil
+	return nil
 }
 
 // graphBuilder accumulates nodes and edges, deduplicating file nodes by path.
 type graphBuilder struct {
-	nodes    []domain.Node
-	edges    []domain.Edge
-	fileIDs  map[string]string // abs path → node ID
+	nodes   []domain.Node
+	edges   []domain.Edge
+	fileIDs map[string]string // abs path → node ID
 }
 
 func newGraphBuilder() *graphBuilder {
@@ -228,17 +258,29 @@ func getReferences(c *conn, docURI URI, pos Position) ([]Location, error) {
 	return locs, err
 }
 
-func findGoFiles(root string) ([]string, error) {
+// findFiles walks root and collects files whose extension matches any of exts,
+// skipping directories named in skipDirs and all dot-directories.
+func findFiles(root string, exts []string, skipDirs []string) ([]string, error) {
+	skip := make(map[string]bool, len(skipDirs))
+	for _, d := range skipDirs {
+		skip[d] = true
+	}
+
 	var files []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && (d.Name() == "vendor" || strings.HasPrefix(d.Name(), ".")) {
+		if d.IsDir() && (skip[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
 			return filepath.SkipDir
 		}
-		if !d.IsDir() && strings.HasSuffix(path, ".go") {
-			files = append(files, path)
+		if !d.IsDir() {
+			for _, ext := range exts {
+				if strings.HasSuffix(path, ext) {
+					files = append(files, path)
+					break
+				}
+			}
 		}
 		return nil
 	})

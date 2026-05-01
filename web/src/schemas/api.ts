@@ -40,3 +40,4 @@ export type Graph = z.infer<typeof GraphSchema>
 export type Node = z.infer<typeof NodeSchema>
 export type Edge = z.infer<typeof EdgeSchema>
 export type FileContent = z.infer<typeof FileContentSchema>
+export type Range = z.infer<typeof RangeSchema>

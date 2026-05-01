@@ -14,6 +14,15 @@ A CLI tool that visualizes source code dependency graphs in your browser using L
   ```sh
   go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest
   ```
+- Language server for the language(s) you want to analyze:
+
+  | Language   | Language Server            | Install                                               |
+  |------------|----------------------------|-------------------------------------------------------|
+  | Go         | gopls                      | `go install golang.org/x/tools/gopls@latest`          |
+  | Rust       | rust-analyzer              | `rustup component add rust-analyzer`                  |
+  | TypeScript | typescript-language-server | `npm install -g typescript-language-server typescript` |
+
+  Language detection is automatic — the target directory is scanned for `go.mod`, `Cargo.toml`, or `tsconfig.json`.
 
 ---
 
@@ -30,7 +39,7 @@ cd web && npm install && cd ..
 make gen
 
 # Start dev servers (Go :8080 + Vite :5173 with proxy)
-make dev
+make dev TARGET_DIR=/path/to/project
 ```
 
 Open [http://localhost:5173](http://localhost:5173) in your browser.
@@ -43,7 +52,7 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 |---|---|
 | `make gen` | Regenerate `core/gen/api.gen.go` and `web/src/gen/api.ts` from `api/openapi.yaml` |
 | `make build` | Production build — outputs a single Go binary with the web SPA embedded |
-| `make dev` | Start Go server (`:8080`) and Vite dev server (`:5173`) in parallel |
+| `make dev TARGET_DIR=<path>` | Start Go server (`:8080`) and Vite dev server (`:5173`) in parallel |
 | `make test` | Run `go test ./...` and `npm test` |
 
 ---
@@ -62,6 +71,10 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 ## Usage
 
 ```sh
+# Development
+make dev TARGET_DIR=/path/to/project
+
+# Production binary
 depgraph <target-dir>
 ```
 
