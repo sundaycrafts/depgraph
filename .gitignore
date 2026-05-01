@@ -8,3 +8,6 @@ web/dist/
 # Build artifacts embedded into Go binary
 core/internal/adapters/http/static/*
 !core/internal/adapters/http/static/.gitkeep
+
+# Claude Code local settings (personal overrides, not for sharing)
+.claude/settings.local.json
