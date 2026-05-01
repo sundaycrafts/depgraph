@@ -1,0 +1,180 @@
+package lsp
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+)
+
+// message is a JSON-RPC 2.0 message (request, response, or notification).
+type message struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      *int64          `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
+}
+
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *rpcError) Error() string {
+	return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message)
+}
+
+// conn manages a JSON-RPC 2.0 connection over stdin/stdout of an LSP process.
+type conn struct {
+	w       io.Writer
+	scanner *bufio.Scanner
+	mu      sync.Mutex
+	nextID  atomic.Int64
+	pending map[int64]chan message
+	pendMu  sync.Mutex
+}
+
+func newConn(r io.Reader, w io.Writer) *conn {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	scanner.Split(splitLSP)
+
+	c := &conn{
+		w:       w,
+		scanner: scanner,
+		pending: make(map[int64]chan message),
+	}
+	return c
+}
+
+// call sends a request and waits for the response.
+func (c *conn) call(method string, params, result any) error {
+	id := c.nextID.Add(1)
+
+	rawParams, err := json.Marshal(params)
+	if err != nil {
+		return fmt.Errorf("marshal params: %w", err)
+	}
+
+	ch := make(chan message, 1)
+	c.pendMu.Lock()
+	c.pending[id] = ch
+	c.pendMu.Unlock()
+
+	if err := c.send(&message{
+		JSONRPC: "2.0",
+		ID:      &id,
+		Method:  method,
+		Params:  rawParams,
+	}); err != nil {
+		c.pendMu.Lock()
+		delete(c.pending, id)
+		c.pendMu.Unlock()
+		return err
+	}
+
+	resp := <-ch
+	if resp.Error != nil {
+		return resp.Error
+	}
+	if result != nil && resp.Result != nil {
+		return json.Unmarshal(resp.Result, result)
+	}
+	return nil
+}
+
+// notify sends a notification (no response expected).
+func (c *conn) notify(method string, params any) error {
+	rawParams, err := json.Marshal(params)
+	if err != nil {
+		return fmt.Errorf("marshal params: %w", err)
+	}
+	return c.send(&message{
+		JSONRPC: "2.0",
+		Method:  method,
+		Params:  rawParams,
+	})
+}
+
+func (c *conn) send(msg *message) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshal message: %w", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err = fmt.Fprintf(c.w, "Content-Length: %d\r\n\r\n%s", len(data), data)
+	return err
+}
+
+// readLoop reads incoming messages and dispatches responses to pending callers.
+// It returns when the reader is exhausted or returns an error.
+func (c *conn) readLoop() error {
+	for c.scanner.Scan() {
+		var msg message
+		if err := json.Unmarshal(c.scanner.Bytes(), &msg); err != nil {
+			continue
+		}
+		if msg.ID != nil {
+			c.pendMu.Lock()
+			ch, ok := c.pending[*msg.ID]
+			if ok {
+				delete(c.pending, *msg.ID)
+			}
+			c.pendMu.Unlock()
+			if ok {
+				ch <- msg
+			}
+		}
+		// notifications are discarded (no routing needed for Phase 1)
+	}
+	return c.scanner.Err()
+}
+
+// splitLSP is a bufio.SplitFunc that reads LSP Content-Length framed messages.
+func splitLSP(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+
+	// Find header terminator \r\n\r\n
+	headerEnd := strings.Index(string(data), "\r\n\r\n")
+	if headerEnd < 0 {
+		if atEOF {
+			return 0, nil, fmt.Errorf("LSP: unexpected EOF in header")
+		}
+		return 0, nil, nil
+	}
+
+	header := string(data[:headerEnd])
+	contentLen := -1
+	for _, line := range strings.Split(header, "\r\n") {
+		if strings.HasPrefix(line, "Content-Length:") {
+			val := strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
+			contentLen, err = strconv.Atoi(val)
+			if err != nil {
+				return 0, nil, fmt.Errorf("LSP: invalid Content-Length: %w", err)
+			}
+		}
+	}
+	if contentLen < 0 {
+		return 0, nil, fmt.Errorf("LSP: missing Content-Length header")
+	}
+
+	start := headerEnd + 4
+	end := start + contentLen
+	if end > len(data) {
+		if atEOF {
+			return 0, nil, fmt.Errorf("LSP: unexpected EOF in body")
+		}
+		return 0, nil, nil
+	}
+
+	return end, data[start:end], nil
+}
