@@ -15,9 +15,9 @@ const smallGraph: Graph = {
 }
 
 test('renders without crashing on empty graph', () => {
-  render(<GraphCanvas graph={emptyGraph} onNodeSelect={() => {}} />)
+  render(<GraphCanvas graph={emptyGraph} onNodeSelect={() => {}} selectedKinds={[]} />)
 })
 
 test('renders without crashing with nodes and edges', () => {
-  render(<GraphCanvas graph={smallGraph} onNodeSelect={() => {}} />)
+  render(<GraphCanvas graph={smallGraph} onNodeSelect={() => {}} selectedKinds={[]} />)
 })

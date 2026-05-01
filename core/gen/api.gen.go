@@ -111,6 +111,9 @@ type Node struct {
 	// Path Absolute file path (file node) or containing file (symbol node)
 	Path  *string `json:"path,omitempty"`
 	Range *Range  `json:"range,omitempty"`
+
+	// SymbolKind LSP symbol kind (function, interface, class, method, struct, etc.). Present for symbol nodes only.
+	SymbolKind *string `json:"symbolKind,omitempty"`
 }
 
 // NodeKind defines model for Node.Kind.

@@ -15,6 +15,7 @@ export const NodeSchema = z.object({
   kind: z.enum(['file', 'symbol']),
   label: z.string(),
   path: z.string().optional(),
+  symbolKind: z.string().optional(),
   range: RangeSchema.optional(),
 })
 

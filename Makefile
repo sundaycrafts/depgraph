@@ -15,6 +15,8 @@ build: gen
 
 dev:
 	cd core && go run ./cmd/depgraph $(TARGET_DIR) & \
+	# arbitrary wait for the backend to start
+	sleep 3 && \
 	cd web && npm run dev
 
 test:

@@ -12,10 +12,14 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "@radix-ui/react-popover": "^1.1.15",
     "@tanstack/react-query": "^5.100.6",
     "@xyflow/react": "^12.10.2",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.14.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
+    "tailwind-merge": "^3.5.0",
     "zod": "^4.4.1"
   },
   "devDependencies": {

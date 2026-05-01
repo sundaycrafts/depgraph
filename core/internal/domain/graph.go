@@ -13,11 +13,12 @@ const (
 )
 
 type Node struct {
-	ID    string
-	Kind  NodeKind
-	Label string
-	Path  string
-	Range *Range
+	ID         string
+	Kind       NodeKind
+	Label      string
+	Path       string
+	SymbolKind string // LSP symbol kind string; empty for file nodes
+	Range      *Range
 }
 
 type EdgeKind string

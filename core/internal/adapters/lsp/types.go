@@ -52,15 +52,22 @@ type DocumentSymbolParams struct {
 type SymbolKind int
 
 const (
-	SymbolKindFile      SymbolKind = 1
-	SymbolKindModule    SymbolKind = 2
-	SymbolKindNamespace SymbolKind = 3
-	SymbolKindPackage   SymbolKind = 4
-	SymbolKindClass     SymbolKind = 5
-	SymbolKindMethod    SymbolKind = 6
-	SymbolKindFunction  SymbolKind = 12
-	SymbolKindStruct    SymbolKind = 23
-	SymbolKindInterface SymbolKind = 11
+	SymbolKindFile        SymbolKind = 1
+	SymbolKindModule      SymbolKind = 2
+	SymbolKindNamespace   SymbolKind = 3
+	SymbolKindPackage     SymbolKind = 4
+	SymbolKindClass       SymbolKind = 5
+	SymbolKindMethod      SymbolKind = 6
+	SymbolKindProperty    SymbolKind = 7
+	SymbolKindField       SymbolKind = 8
+	SymbolKindConstructor SymbolKind = 9
+	SymbolKindEnum        SymbolKind = 10
+	SymbolKindInterface   SymbolKind = 11
+	SymbolKindFunction    SymbolKind = 12
+	SymbolKindVariable    SymbolKind = 13
+	SymbolKindConstant    SymbolKind = 14
+	SymbolKindStruct      SymbolKind = 23
+	SymbolKindTypeParam   SymbolKind = 26
 )
 
 // DocumentSymbol is a symbol in a document (hierarchical form).

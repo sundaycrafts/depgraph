@@ -4,7 +4,7 @@ import { GraphCanvas } from './GraphCanvas'
 
 describe('GraphCanvas', () => {
   it('renders without crashing on empty graph', () => {
-    render(<GraphCanvas graph={{ nodes: [], edges: [] }} onNodeSelect={() => {}} />)
+    render(<GraphCanvas graph={{ nodes: [], edges: [] }} onNodeSelect={() => {}} selectedKinds={[]} />)
   })
 
   it('renders with nodes and edges', () => {
@@ -12,6 +12,6 @@ describe('GraphCanvas', () => {
       nodes: [{ id: 'n1', kind: 'file' as const, label: 'main.go', path: '/src/main.go' }],
       edges: [],
     }
-    render(<GraphCanvas graph={graph} onNodeSelect={() => {}} />)
+    render(<GraphCanvas graph={graph} onNodeSelect={() => {}} selectedKinds={[]} />)
   })
 })

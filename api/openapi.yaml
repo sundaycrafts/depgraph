@@ -73,6 +73,9 @@ components:
         path:
           type: string
           description: Absolute file path (file node) or containing file (symbol node)
+        symbolKind:
+          type: string
+          description: LSP symbol kind (function, interface, class, method, struct, etc.). Present for symbol nodes only.
         range:
           $ref: "#/components/schemas/Range"
           description: Present for symbol nodes

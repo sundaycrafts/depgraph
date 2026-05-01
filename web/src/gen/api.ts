@@ -53,6 +53,8 @@ export interface components {
             label: string;
             /** @description Absolute file path (file node) or containing file (symbol node) */
             path?: string;
+            /** @description LSP symbol kind (function, interface, class, method, struct, etc.). Present for symbol nodes only. */
+            symbolKind?: string;
             /** @description Present for symbol nodes */
             range?: components["schemas"]["Range"];
         };

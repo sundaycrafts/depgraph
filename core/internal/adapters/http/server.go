@@ -100,6 +100,10 @@ func toGenGraph(g domain.Graph) gen.Graph {
 			p := n.Path
 			node.Path = &p
 		}
+		if n.SymbolKind != "" {
+			sk := n.SymbolKind
+			node.SymbolKind = &sk
+		}
 		if n.Range != nil {
 			node.Range = &gen.Range{
 				Start: gen.Position{Line: n.Range.Start.Line, Character: n.Range.Start.Character},

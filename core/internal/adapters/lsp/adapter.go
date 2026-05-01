@@ -136,7 +136,7 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		}
 
 		for _, sym := range syms {
-			symID := gb.addSymbolNode(sym.Name, file, sym.Range)
+			symID := gb.addSymbolNode(sym.Name, file, sym.Range, sym.Kind)
 			gb.addEdge(fileID, symID, domain.EdgeKindDefines, domain.ConfidenceExact)
 
 			if !initResult.Capabilities.ReferencesProvider {
@@ -182,17 +182,40 @@ func (gb *graphBuilder) addFileNode(path string) string {
 	return id
 }
 
-func (gb *graphBuilder) addSymbolNode(name, file string, r Range) string {
+func (gb *graphBuilder) addSymbolNode(name, file string, r Range, kind SymbolKind) string {
 	id := uuid.NewString()
 	dr := toDomainRange(r)
 	gb.nodes = append(gb.nodes, domain.Node{
-		ID:    id,
-		Kind:  domain.NodeKindSymbol,
-		Label: name,
-		Path:  file,
-		Range: &dr,
+		ID:         id,
+		Kind:       domain.NodeKindSymbol,
+		Label:      name,
+		Path:       file,
+		SymbolKind: symbolKindName(kind),
+		Range:      &dr,
 	})
 	return id
+}
+
+func symbolKindName(k SymbolKind) string {
+	switch k {
+	case SymbolKindFile:        return "file"
+	case SymbolKindModule:      return "module"
+	case SymbolKindNamespace:   return "namespace"
+	case SymbolKindPackage:     return "package"
+	case SymbolKindClass:       return "class"
+	case SymbolKindMethod:      return "method"
+	case SymbolKindProperty:    return "property"
+	case SymbolKindField:       return "field"
+	case SymbolKindConstructor: return "constructor"
+	case SymbolKindEnum:        return "enum"
+	case SymbolKindInterface:   return "interface"
+	case SymbolKindFunction:    return "function"
+	case SymbolKindVariable:    return "variable"
+	case SymbolKindConstant:    return "constant"
+	case SymbolKindStruct:      return "struct"
+	case SymbolKindTypeParam:   return "typeParameter"
+	default:                    return ""
+	}
 }
 
 func (gb *graphBuilder) addEdge(from, to string, kind domain.EdgeKind, conf domain.Confidence) {
