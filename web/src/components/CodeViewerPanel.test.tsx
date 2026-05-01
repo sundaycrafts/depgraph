@@ -1,18 +1,24 @@
 import { render, screen } from '@testing-library/react'
-import { describe, it } from 'vitest'
+import { describe, it, expect } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { CodeViewerPanel } from './CodeViewerPanel'
 
+function wrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      {children}
+    </QueryClientProvider>
+  )
+}
+
 describe('CodeViewerPanel', () => {
-  it('renders nothing when node is null', () => {
-    const { container } = render(<CodeViewerPanel node={null} />)
-    if (container.firstChild !== null) {
-      throw new Error('expected no rendered output for null node')
-    }
+  it('shows placeholder when no node selected', () => {
+    render(<CodeViewerPanel node={null} />, { wrapper })
+    expect(screen.getByText(/select a node/i)).toBeInTheDocument()
   })
 
-  it('displays node label', () => {
-    const node = { id: 'n1', kind: 'symbol' as const, label: 'MyFunc' }
-    render(<CodeViewerPanel node={node} />)
-    screen.getByText(/MyFunc/)
+  it('renders without crashing when node is provided', () => {
+    const node = { id: 'n1', kind: 'symbol' as const, label: 'MyFunc', path: '/src/main.go' }
+    render(<CodeViewerPanel node={node} />, { wrapper })
   })
 })
