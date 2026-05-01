@@ -30,16 +30,14 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
     const { fitView } = useReactFlow<GraphRFNode, GraphRFEdge>();
 
     const visibleDomainNodes = useMemo(() => {
-        if (selectedKinds.length === 0) {
-            return graph.nodes;
-        }
-
         return graph.nodes.filter((n) => {
             if (n.kind === "file") {
-                return true;
+                return selectedKinds.includes("file");
             }
-
-            return n.symbolKind != null && selectedKinds.includes(n.symbolKind);
+            return (
+                selectedKinds.length === 0 ||
+                (n.symbolKind != null && selectedKinds.includes(n.symbolKind))
+            );
         });
     }, [graph.nodes, selectedKinds]);
 

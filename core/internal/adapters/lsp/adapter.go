@@ -118,6 +118,10 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		return fmt.Errorf("find files: %w", err)
 	}
 
+	// Pass 1: collect all symbols and add "defines" (file→symbol) edges.
+	// Keys in fileSymbols are canonicalized so that lookups in pass 2 — which
+	// derive their key from gopls' Location.URI — match consistently.
+	fileSymbols := make(map[string][]symEntry, len(files))
 	for _, file := range files {
 		docURI := fileURI(file)
 		fileID := gb.addFileNode(file)
@@ -126,45 +130,118 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		if err := c.call("textDocument/documentSymbol", DocumentSymbolParams{
 			TextDocument: TextDocumentIdentifier{URI: docURI},
 		}, &raw); err != nil {
-			// Non-fatal: skip files the server can't parse.
 			continue
 		}
-
 		syms, err := parseSymbols(raw)
 		if err != nil {
 			continue
 		}
-
+		key := canonPath(file)
 		for _, sym := range syms {
 			symID := gb.addSymbolNode(sym.Name, file, sym.Range, sym.Kind)
 			gb.addEdge(fileID, symID, domain.EdgeKindDefines, domain.ConfidenceExact)
+			fileSymbols[key] = append(fileSymbols[key], symEntry{id: symID, sym: sym})
+		}
+	}
 
-			if !initResult.Capabilities.ReferencesProvider {
-				continue
-			}
-			refs, err := getReferences(c, docURI, sym.SelectionRange.Start)
+	// Pass 2: resolve references into symbol→symbol "references" edges.
+	if !initResult.Capabilities.ReferencesProvider {
+		return nil
+	}
+	for _, file := range files {
+		docURI := fileURI(file)
+		key := canonPath(file)
+		for _, entry := range fileSymbols[key] {
+			refs, err := getReferences(c, docURI, entry.sym.SelectionRange.Start)
 			if err != nil {
 				continue
 			}
 			for _, ref := range refs {
-				refFile := uriToPath(ref.URI)
-				refFileID := gb.addFileNode(refFile)
-				gb.addEdge(refFileID, symID, domain.EdgeKindReferences, domain.ConfidenceProbable)
+				refFile := canonPath(uriToPath(ref.URI))
+				callerID := findContainingSymbol(fileSymbols[refFile], ref.Range.Start)
+				if callerID != "" {
+					if callerID == entry.id {
+						// Self-reference (e.g., recursion): skip self-loops.
+						continue
+					}
+					gb.addEdge(callerID, entry.id, domain.EdgeKindReferences, domain.ConfidenceProbable)
+				} else {
+					// Reference sits outside any symbol (top-level): fall back to file→symbol.
+					refFileID := gb.addFileNode(refFile)
+					gb.addEdge(refFileID, entry.id, domain.EdgeKindReferences, domain.ConfidenceProbable)
+				}
 			}
 		}
 	}
 	return nil
 }
 
-// graphBuilder accumulates nodes and edges, deduplicating file nodes by path.
+// symEntry pairs a node ID with the DocumentSymbol it was built from.
+type symEntry struct {
+	id  string
+	sym DocumentSymbol
+}
+
+// containsPos reports whether Range r contains Position p.
+// LSP ranges are half-open: start is inclusive, end is exclusive.
+func containsPos(r Range, p Position) bool {
+	if p.Line < r.Start.Line || (p.Line == r.Start.Line && p.Character < r.Start.Character) {
+		return false
+	}
+	if p.Line > r.End.Line || (p.Line == r.End.Line && p.Character >= r.End.Character) {
+		return false
+	}
+	return true
+}
+
+// findContainingSymbol returns the ID of the innermost symbol whose Range contains pos,
+// or "" if no symbol contains it (top-level reference).
+func findContainingSymbol(entries []symEntry, pos Position) string {
+	best, bestLines := "", -1
+	for _, e := range entries {
+		if !containsPos(e.sym.Range, pos) {
+			continue
+		}
+		lines := e.sym.Range.End.Line - e.sym.Range.Start.Line
+		if best == "" || lines < bestLines {
+			best, bestLines = e.id, lines
+		}
+	}
+	return best
+}
+
+// canonPath canonicalizes a filesystem path so map keys produced by walking
+// the disk match keys derived from LSP URIs returned by the server.
+func canonPath(p string) string {
+	if p == "" {
+		return p
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	return filepath.Clean(abs)
+}
+
+type edgeKey struct {
+	from, to string
+	kind     domain.EdgeKind
+}
+
+// graphBuilder accumulates nodes and edges, deduplicating file nodes by path
+// and (from, to, kind) triples for edges.
 type graphBuilder struct {
 	nodes   []domain.Node
 	edges   []domain.Edge
 	fileIDs map[string]string // abs path → node ID
+	edgeSet map[edgeKey]bool
 }
 
 func newGraphBuilder() *graphBuilder {
-	return &graphBuilder{fileIDs: make(map[string]string)}
+	return &graphBuilder{
+		fileIDs: make(map[string]string),
+		edgeSet: make(map[edgeKey]bool),
+	}
 }
 
 func (gb *graphBuilder) addFileNode(path string) string {
@@ -219,6 +296,11 @@ func symbolKindName(k SymbolKind) string {
 }
 
 func (gb *graphBuilder) addEdge(from, to string, kind domain.EdgeKind, conf domain.Confidence) {
+	k := edgeKey{from, to, kind}
+	if gb.edgeSet[k] {
+		return
+	}
+	gb.edgeSet[k] = true
 	gb.edges = append(gb.edges, domain.Edge{
 		ID:         uuid.NewString(),
 		From:       from,
