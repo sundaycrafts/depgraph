@@ -6,8 +6,30 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// writerFunc is an io.Writer backed by a function, used to intercept writes in tests.
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// pipeConn wires up a conn with an io.Pipe as the response reader.
+// The caller feeds responses via the returned *io.PipeWriter.
+// Responses are only written after the first request is sent, ensuring
+// readLoop cannot process a response before call registers its pending channel.
+func pipeConn(w io.Writer) (*conn, *io.PipeWriter, chan struct{}) {
+	pr, pw := io.Pipe()
+	sent := make(chan struct{})
+	var once sync.Once
+	c := newConn(pr, writerFunc(func(p []byte) (int, error) {
+		n, err := w.Write(p)
+		once.Do(func() { close(sent) })
+		return n, err
+	}))
+	return c, pw, sent
+}
 
 func TestSplitLSP(t *testing.T) {
 	body := `{"jsonrpc":"2.0","id":1,"result":{}}`
@@ -39,14 +61,19 @@ func TestSplitLSP_Partial(t *testing.T) {
 }
 
 func TestConn_CallAndResponse(t *testing.T) {
-	// Build a fake server: read one request, write one response.
-	reqBuf := &bytes.Buffer{}
+	var reqBuf bytes.Buffer
+	c, pw, sent := pipeConn(&reqBuf)
+	go c.readLoop() //nolint:errcheck
+
 	respBody := `{"jsonrpc":"2.0","id":1,"result":{"hello":"world"}}`
 	respFrame := fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(respBody), respBody)
-	respReader := strings.NewReader(respFrame)
 
-	c := newConn(respReader, reqBuf)
-	go c.readLoop() //nolint:errcheck
+	// Feed the response only after call has sent the request (pending[1] is registered).
+	go func() {
+		<-sent
+		fmt.Fprint(pw, respFrame)
+		pw.Close()
+	}()
 
 	var result map[string]string
 	if err := c.call("test/method", map[string]any{"x": 1}, &result); err != nil {
@@ -67,11 +94,17 @@ func TestConn_CallAndResponse(t *testing.T) {
 }
 
 func TestConn_CallRPCError(t *testing.T) {
+	c, pw, sent := pipeConn(io.Discard)
+	go c.readLoop() //nolint:errcheck
+
 	errBody := `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`
 	errFrame := fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(errBody), errBody)
 
-	c := newConn(strings.NewReader(errFrame), io.Discard)
-	go c.readLoop() //nolint:errcheck
+	go func() {
+		<-sent
+		fmt.Fprint(pw, errFrame)
+		pw.Close()
+	}()
 
 	err := c.call("unknown/method", nil, nil)
 	if err == nil {
