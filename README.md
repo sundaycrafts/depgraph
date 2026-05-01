@@ -66,3 +66,15 @@ depgraph <target-dir>
 ```
 
 Analyzes `<target-dir>` via LSP, starts a local HTTP server, and opens the graph in your browser.
+
+---
+
+## Releasing
+
+1. Merge all changes to `main` and verify CI passes.
+2. Tag the commit and push:
+   ```sh
+   git tag v1.2.3
+   git push origin v1.2.3
+   ```
+3. GitHub Actions builds binaries for Linux and macOS (amd64 + arm64) and publishes a GitHub Release automatically.
