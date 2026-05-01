@@ -1,0 +1,141 @@
+openapi: 3.0.3
+info:
+  title: depgraph API
+  version: 0.1.0
+
+paths:
+  /graph:
+    get:
+      summary: Get dependency graph
+      operationId: getGraph
+      responses:
+        "200":
+          description: Dependency graph
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Graph"
+
+  /file:
+    get:
+      summary: Get file content
+      operationId: getFile
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Absolute path to the file within the analyzed root
+      responses:
+        "200":
+          description: File content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileContent"
+        "404":
+          description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+components:
+  schemas:
+
+    # ---- Graph ----
+
+    Graph:
+      type: object
+      required: [nodes, edges]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Node"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/Edge"
+
+    Node:
+      type: object
+      required: [id, kind, label]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [file, symbol]
+        label:
+          type: string
+        path:
+          type: string
+          description: Absolute file path (file node) or containing file (symbol node)
+        range:
+          $ref: "#/components/schemas/Range"
+          description: Present for symbol nodes
+
+    Edge:
+      type: object
+      required: [id, from, to, kind, confidence]
+      properties:
+        id:
+          type: string
+        from:
+          type: string
+          description: Source node id
+        to:
+          type: string
+          description: Target node id
+        kind:
+          type: string
+          enum: [defines, references]
+        confidence:
+          type: string
+          enum: [exact, probable]
+
+    # ---- File ----
+
+    FileContent:
+      type: object
+      required: [path, content]
+      properties:
+        path:
+          type: string
+        content:
+          type: string
+
+    # ---- Primitives ----
+
+    Range:
+      type: object
+      required: [start, end]
+      properties:
+        start:
+          $ref: "#/components/schemas/Position"
+        end:
+          $ref: "#/components/schemas/Position"
+
+    Position:
+      type: object
+      required: [line, character]
+      properties:
+        line:
+          type: integer
+          minimum: 0
+          description: 0-based line number (LSP convention)
+        character:
+          type: integer
+          minimum: 0
+          description: 0-based UTF-16 character offset (LSP convention)
+
+    # ---- Error ----
+
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string

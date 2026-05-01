@@ -1,0 +1,10 @@
+# Go
+core/bin/
+
+# Web
+web/node_modules/
+web/dist/
+
+# Build artifacts embedded into Go binary
+core/internal/adapters/http/static/*
+!core/internal/adapters/http/static/.gitkeep
