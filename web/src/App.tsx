@@ -1,30 +1,37 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
+import { useGraph } from './hooks/useGraph'
 import { GraphCanvas } from './components/GraphCanvas'
 import { CodeViewerPanel } from './components/CodeViewerPanel'
-import type { components } from './gen/api'
-
-type Graph = components['schemas']['Graph']
-type Node = components['schemas']['Node']
+import type { Node } from './schemas/api'
 
 export default function App() {
-  const [graph, setGraph] = useState<Graph | null>(null)
-  const [selectedNode, _setSelectedNode] = useState<Node | null>(null)
+  const { data: graph, isLoading, error } = useGraph()
+  const [selectedNode, setSelectedNode] = useState<Node | null>(null)
 
-  useEffect(() => {
-    fetch('/graph')
-      .then((r) => r.json())
-      .then((data: Graph) => setGraph(data))
-      .catch(console.error)
-  }, [])
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen text-gray-500">
+        Loading graph...
+      </div>
+    )
+  }
 
-  if (!graph) return <div>Loading...</div>
+  if (error) {
+    return (
+      <div className="flex items-center justify-center h-screen text-red-500">
+        Error: {error.message}
+      </div>
+    )
+  }
+
+  if (!graph) return null
 
   return (
-    <div style={{ display: 'flex', height: '100vh' }}>
-      <div style={{ flex: 1 }}>
-        <GraphCanvas graph={graph} />
+    <div className="flex h-screen">
+      <div className="flex-1">
+        <GraphCanvas graph={graph} onNodeSelect={setSelectedNode} />
       </div>
-      <div style={{ width: 400 }}>
+      <div className="w-96 border-l">
         <CodeViewerPanel node={selectedNode} />
       </div>
     </div>
