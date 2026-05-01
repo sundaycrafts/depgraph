@@ -15,8 +15,12 @@ build: gen
 
 DEPGRAPH_ARGS ?=
 
+# Resolve TARGET_DIR: absolute paths are passed through; relative paths are
+# anchored at $PWD (where `make` was invoked) before we cd into core/.
+TARGET_DIR_RESOLVED := $(if $(TARGET_DIR),$(if $(filter /%,$(TARGET_DIR)),$(TARGET_DIR),$(PWD)/$(TARGET_DIR)))
+
 dev:
-	cd core && go run ./cmd/depgraph $(TARGET_DIR) $(DEPGRAPH_ARGS) & \
+	cd core && go run ./cmd/depgraph $(TARGET_DIR_RESOLVED) $(DEPGRAPH_ARGS) & \
 	# arbitrary wait for the backend to start
 	sleep 3 && \
 	cd web && npm run dev
