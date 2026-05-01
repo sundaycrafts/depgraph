@@ -3,7 +3,10 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/http"
+	"os"
 
 	"github.com/sundaycrafts/depgraph/gen"
 	"github.com/sundaycrafts/depgraph/internal/domain"
@@ -21,20 +24,20 @@ type Adapter struct {
 var _ ports.ServerPort = (*Adapter)(nil)
 var _ gen.ServerInterface = (*Adapter)(nil)
 
-func New(editor ports.EditorPort) *Adapter {
-	return &Adapter{editor: editor}
+func New(graph domain.Graph, editor ports.EditorPort) *Adapter {
+	return &Adapter{graph: graph, editor: editor}
 }
 
-func (a *Adapter) Serve(ctx context.Context, graph domain.Graph) error {
-	a.graph = graph
-
+func (a *Adapter) Serve(ctx context.Context) error {
 	mux := http.NewServeMux()
-	apiHandler := gen.Handler(a)
 
-	// Mount API routes and static SPA files.
-	mux.Handle("/graph", apiHandler)
-	mux.Handle("/file", apiHandler)
-	mux.Handle("/", http.FileServer(http.FS(StaticFiles)))
+	gen.HandlerWithOptions(a, gen.StdHTTPServerOptions{BaseRouter: mux})
+
+	subFS, err := fs.Sub(StaticFiles, "static")
+	if err != nil {
+		return err
+	}
+	mux.Handle("/", http.FileServer(http.FS(subFS)))
 
 	srv := &http.Server{Addr: ":8080", Handler: mux}
 
@@ -43,22 +46,64 @@ func (a *Adapter) Serve(ctx context.Context, graph domain.Graph) error {
 		srv.Shutdown(context.Background()) //nolint:errcheck
 	}()
 
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
 }
 
 func (a *Adapter) GetGraph(w http.ResponseWriter, _ *http.Request) {
-	panic("not implemented")
+	writeJSON(w, http.StatusOK, toGenGraph(a.graph))
 }
 
 func (a *Adapter) GetFile(w http.ResponseWriter, _ *http.Request, params gen.GetFileParams) {
-	panic("not implemented")
+	content, err := a.editor.GetFileContent(params.Path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeJSON(w, http.StatusNotFound, gen.Error{Message: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Message: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, gen.FileContent{Path: params.Path, Content: content})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v) //nolint:errcheck
+}
+
+func toGenGraph(g domain.Graph) gen.Graph {
+	nodes := make([]gen.Node, len(g.Nodes))
+	for i, n := range g.Nodes {
+		node := gen.Node{
+			Id:    n.ID,
+			Kind:  gen.NodeKind(n.Kind),
+			Label: n.Label,
+		}
+		if n.Path != "" {
+			p := n.Path
+			node.Path = &p
+		}
+		if n.Range != nil {
+			node.Range = &gen.Range{
+				Start: gen.Position{Line: n.Range.Start.Line, Character: n.Range.Start.Character},
+				End:   gen.Position{Line: n.Range.End.Line, Character: n.Range.End.Character},
+			}
+		}
+		nodes[i] = node
+	}
+	edges := make([]gen.Edge, len(g.Edges))
+	for i, e := range g.Edges {
+		edges[i] = gen.Edge{
+			Id:         e.ID,
+			From:       e.From,
+			To:         e.To,
+			Kind:       gen.EdgeKind(e.Kind),
+			Confidence: gen.EdgeConfidence(e.Confidence),
+		}
+	}
+	return gen.Graph{Nodes: nodes, Edges: edges}
 }

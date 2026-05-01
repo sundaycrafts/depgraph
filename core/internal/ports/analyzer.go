@@ -11,3 +11,10 @@ import (
 type AnalyzerPort interface {
 	Analyze(ctx context.Context, root string) (domain.Graph, error)
 }
+
+// AnalyzerFunc is a function adapter for AnalyzerPort.
+type AnalyzerFunc func(ctx context.Context, root string) (domain.Graph, error)
+
+func (f AnalyzerFunc) Analyze(ctx context.Context, root string) (domain.Graph, error) {
+	return f(ctx, root)
+}
