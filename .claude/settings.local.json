@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(go mod *)",
+      "Bash(go get *)",
+      "Bash(go install *)",
+      "Bash(oapi-codegen -config oapi-codegen.yaml openapi.yaml)",
+      "Bash(oapi-codegen -config oapi-codegen.yaml ../api/openapi.yaml)",
+      "Bash(npm create *)",
+      "Bash(npm install *)",
+      "Bash(npx openapi-typescript *)",
+      "Bash(go build *)",
+      "Bash(npm run *)",
+      "Bash(git -C /home/ubuntu/depgraph ls-files --others --exclude-standard --cached)",
+      "Bash(git -C /home/ubuntu/depgraph status)",
+      "Bash(git -C /home/ubuntu/depgraph log --oneline -5)",
+      "Bash(git add *)",
+      "Bash(git -C /home/ubuntu/depgraph status --short)",
+      "Bash(git -C /home/ubuntu/depgraph commit -m ' *)",
+      "Bash(git -C /home/ubuntu/depgraph diff --stat HEAD)",
+      "Bash(git worktree *)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Read(//home/ubuntu/depgraph-lsp/core/internal/adapters/lsp/**)",
+      "Read(//home/ubuntu/depgraph-http/core/internal/adapters/**)",
+      "Read(//home/ubuntu/depgraph-web/web/src/**)",
+      "Bash(go test *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(npm test *)",
+      "Bash(git merge *)"
+    ]
+  }
+}

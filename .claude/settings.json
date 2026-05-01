@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go mod *)",
+      "Bash(go get *)",
+      "Bash(go install *)",
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(go vet *)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(npm ci *)",
+      "Bash(npx *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git checkout *)",
+      "Bash(git worktree *)",
+      "Bash(mkdir *)",
+      "Bash(touch *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(cat *)",
+      "Bash(echo *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob"
+    ]
+  }
+}

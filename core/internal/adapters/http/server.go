@@ -19,13 +19,26 @@ import (
 type Adapter struct {
 	graph  domain.Graph
 	editor ports.EditorPort
+	addr   string
 }
 
 var _ ports.ServerPort = (*Adapter)(nil)
 var _ gen.ServerInterface = (*Adapter)(nil)
 
-func New(graph domain.Graph, editor ports.EditorPort) *Adapter {
-	return &Adapter{graph: graph, editor: editor}
+// Option configures the HTTP Adapter.
+type Option func(*Adapter)
+
+// WithAddr sets the TCP address the server listens on (default ":8080").
+func WithAddr(addr string) Option {
+	return func(a *Adapter) { a.addr = addr }
+}
+
+func New(graph domain.Graph, editor ports.EditorPort, opts ...Option) *Adapter {
+	a := &Adapter{graph: graph, editor: editor, addr: ":8080"}
+	for _, o := range opts {
+		o(a)
+	}
+	return a
 }
 
 func (a *Adapter) Serve(ctx context.Context) error {
@@ -39,7 +52,7 @@ func (a *Adapter) Serve(ctx context.Context) error {
 	}
 	mux.Handle("/", http.FileServer(http.FS(subFS)))
 
-	srv := &http.Server{Addr: ":8080", Handler: mux}
+	srv := &http.Server{Addr: a.addr, Handler: mux}
 
 	go func() {
 		<-ctx.Done()

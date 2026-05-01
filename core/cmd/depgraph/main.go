@@ -12,8 +12,7 @@ import (
 
 	fsadapter "github.com/sundaycrafts/depgraph/internal/adapters/fs"
 	httpadapter "github.com/sundaycrafts/depgraph/internal/adapters/http"
-	"github.com/sundaycrafts/depgraph/internal/domain"
-	"github.com/sundaycrafts/depgraph/internal/ports"
+	lspadapter "github.com/sundaycrafts/depgraph/internal/adapters/lsp"
 )
 
 var version = "dev"
@@ -28,11 +27,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// noopAnalyzer returns an empty graph; replaced when lsp branch is merged.
-	analyzer := ports.AnalyzerFunc(func(_ context.Context, _ string) (domain.Graph, error) {
-		return domain.Graph{Nodes: []domain.Node{}, Edges: []domain.Edge{}}, nil
-	})
-
+	analyzer := lspadapter.New()
 	editor := fsadapter.New(root)
 
 	graph, err := analyzer.Analyze(ctx, root)
