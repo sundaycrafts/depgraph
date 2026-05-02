@@ -125,3 +125,16 @@ type ReferenceParams struct {
 type ReferenceContext struct {
 	IncludeDeclaration bool `json:"includeDeclaration"`
 }
+
+// TextDocumentItem describes a text document opened by the client.
+type TextDocumentItem struct {
+	URI        URI    `json:"uri"`
+	LanguageID string `json:"languageId"`
+	Version    int    `json:"version"`
+	Text       string `json:"text"`
+}
+
+// DidOpenTextDocumentParams is the params for "textDocument/didOpen".
+type DidOpenTextDocumentParams struct {
+	TextDocument TextDocumentItem `json:"textDocument"`
+}

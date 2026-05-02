@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // message is a JSON-RPC 2.0 message (request, response, or notification).
@@ -38,6 +40,11 @@ type conn struct {
 	nextID  atomic.Int64
 	pending map[int64]chan message
 	pendMu  sync.Mutex
+
+	progMu        sync.Mutex
+	progFlight    int           // number of in-flight $/progress tokens
+	progBeganOnce sync.Once
+	progBeganCh   chan struct{} // closed when the first $/progress begin is received
 }
 
 func newConn(r io.Reader, w io.Writer) *conn {
@@ -46,9 +53,10 @@ func newConn(r io.Reader, w io.Writer) *conn {
 	scanner.Split(splitLSP)
 
 	c := &conn{
-		w:       w,
-		scanner: scanner,
-		pending: make(map[int64]chan message),
+		w:           w,
+		scanner:     scanner,
+		pending:     make(map[int64]chan message),
+		progBeganCh: make(chan struct{}),
 	}
 	return c
 }
@@ -131,10 +139,69 @@ func (c *conn) readLoop() error {
 			if ok {
 				ch <- msg
 			}
+		} else if msg.Method == "$/progress" {
+			var p struct {
+				Value struct {
+					Kind string `json:"kind"`
+				} `json:"value"`
+			}
+			if err := json.Unmarshal(msg.Params, &p); err == nil {
+				var signalBegin bool
+				c.progMu.Lock()
+				switch p.Value.Kind {
+				case "begin":
+					c.progFlight++
+					signalBegin = true
+				case "end":
+					if c.progFlight > 0 {
+						c.progFlight--
+					}
+				}
+				c.progMu.Unlock()
+				if signalBegin {
+					c.progBeganOnce.Do(func() { close(c.progBeganCh) })
+				}
+			}
 		}
-		// notifications are discarded (no routing needed for Phase 1)
 	}
 	return c.scanner.Err()
+}
+
+// waitForIdle blocks until the server has completed all background indexing.
+//
+// Some language servers (e.g. rust-analyzer) perform initial indexing
+// asynchronously and signal it via $/progress begin/end notifications.
+// We wait up to maxStartupWait for the first begin; if none arrives within
+// that window the server is assumed to be already idle and we return early.
+// Once at least one begin has been seen we poll until progFlight drops to zero.
+func (c *conn) waitForIdle(ctx context.Context) {
+	const maxStartupWait = 30 * time.Second
+	const poll = 200 * time.Millisecond
+
+	// Phase 1: block until first $/progress begin (or timeout/cancel).
+	select {
+	case <-c.progBeganCh:
+		// at least one background task started; proceed to wait for completion
+	case <-time.After(maxStartupWait):
+		return // no progress ever started; server is idle
+	case <-ctx.Done():
+		return
+	}
+
+	// Phase 2: poll until all in-flight progress tokens are resolved.
+	for {
+		c.progMu.Lock()
+		idle := c.progFlight <= 0
+		c.progMu.Unlock()
+		if idle {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(poll):
+		}
+	}
 }
 
 // splitLSP is a bufio.SplitFunc that reads LSP Content-Length framed messages.

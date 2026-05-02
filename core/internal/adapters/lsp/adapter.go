@@ -121,6 +121,10 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		return fmt.Errorf("initialized: %w", err)
 	}
 
+	// Wait for the server to finish background indexing (e.g. rust-analyzer)
+	// before querying symbols and references.
+	c.waitForIdle(ctx)
+
 	files, err := findFiles(root, m.FileExts, a.excludes)
 	if err != nil {
 		return fmt.Errorf("find files: %w", err)
@@ -133,6 +137,19 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 	for _, file := range files {
 		docURI := fileURI(file)
 		fileID := gb.addFileNode(file)
+
+		// Some language servers (e.g. typescript-language-server) require the
+		// document to be opened before documentSymbol requests will return results.
+		if text, err := os.ReadFile(file); err == nil {
+			_ = c.notify("textDocument/didOpen", DidOpenTextDocumentParams{
+				TextDocument: TextDocumentItem{
+					URI:        docURI,
+					LanguageID: langIDForFile(lang, file),
+					Version:    1,
+					Text:       string(text),
+				},
+			})
+		}
 
 		var raw symbolResult
 		if err := c.call("textDocument/documentSymbol", DocumentSymbolParams{
@@ -422,6 +439,23 @@ func findFiles(root string, exts, excludes []string) ([]string, error) {
 		return nil
 	})
 	return files, err
+}
+
+// langIDForFile returns the LSP languageId for the given file and language.
+func langIDForFile(lang lsploader.Language, path string) string {
+	switch lang {
+	case lsploader.Go:
+		return "go"
+	case lsploader.Rust:
+		return "rust"
+	case lsploader.TypeScript:
+		if strings.HasSuffix(path, ".tsx") {
+			return "typescriptreact"
+		}
+		return "typescript"
+	default:
+		return ""
+	}
 }
 
 func fileURI(path string) URI {
