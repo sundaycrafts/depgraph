@@ -4,6 +4,19 @@ A CLI tool that visualizes source code dependency graphs in your browser using L
 
 > **Docs:** [Architecture (C4 model, API, ports & adapters)](./_docs/architecture.md)
 
+## Try it out
+
+> [!NOTE]
+> Currently, I only tested it with Go project.
+
+```sh
+curl -L -o depgraph https://github.com/sundaycrafts/depgraph/releases/latest/download/depgraph-linux-amd64
+./depgraph <project root> --exclude=<grob pattern>
+# e.g. depgraph core --exclude=**/*_test.go --exclude=**/main.go --exclude=**/*.gen.go
+```
+
+![GUI preview](./_docs/gui_preview.png)
+
 ---
 
 ## Prerequisites
