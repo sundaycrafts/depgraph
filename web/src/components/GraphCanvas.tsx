@@ -1,4 +1,5 @@
 import {
+    MarkerType,
     ReactFlow,
     ReactFlowProvider,
     useEdgesState,
@@ -7,7 +8,7 @@ import {
     type Edge as RFEdge,
     type Node as RFNode,
 } from "@xyflow/react";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "@xyflow/react/dist/style.css";
 
 import type { Graph, Node as DomainNode } from "../schemas/api";
@@ -29,6 +30,7 @@ type GraphRFEdge = RFEdge;
 const FILE_BG = "#dbeafe";
 const SYMBOL_BASE_HSL = { h: 53, s: 96, l: 88 } as const; // #fef9c3
 const SYMBOL_HOT_HSL = { h: 0, s: 85, l: 82 } as const; // max-references red
+const HIGHLIGHT_BG = "#93c5fd"; // blue-300 — more vivid than file-node blue (#dbeafe)
 const COLS = 6;
 const COL_WIDTH = 200;
 const ROW_HEIGHT = 100;
@@ -50,6 +52,7 @@ function symbolBg(refCount: number, maxRefCount: number): string {
 
 function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
     const { fitView } = useReactFlow<GraphRFNode, GraphRFEdge>();
+    const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
     const visibleDomainNodes = useMemo(() => {
         return graph.nodes.filter((n) => {
@@ -71,6 +74,23 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
         );
     }, [graph.edges, visibleDomainNodes]);
 
+    // BFS upstream: find selectedNodeId and all nodes that (transitively) depend on it.
+    const highlightedIds = useMemo<Set<string>>(() => {
+        if (!selectedNodeId) return new Set();
+        const result = new Set<string>([selectedNodeId]);
+        const queue = [selectedNodeId];
+        while (queue.length > 0) {
+            const cur = queue.shift()!;
+            for (const e of visibleDomainEdges) {
+                if (e.to === cur && !result.has(e.from)) {
+                    result.add(e.from);
+                    queue.push(e.from);
+                }
+            }
+        }
+        return result;
+    }, [selectedNodeId, visibleDomainEdges]);
+
     // Incoming "references" count per node. Computed from the full graph so
     // it stays stable as the user toggles filter chips.
     const refCountByNodeId = useMemo(() => {
@@ -89,6 +109,8 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
             fontSize: "12px",
             padding: "4px 8px",
         };
+        const highlightStyle = (id: string) =>
+            highlightedIds.has(id) ? { background: HIGHLIGHT_BG } : {};
 
         const files = visibleDomainNodes.filter((n) => n.kind === "file");
         const symbols = visibleDomainNodes
@@ -113,7 +135,7 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
                 x: (i % COLS) * COL_WIDTH,
                 y: Math.floor(i / COLS) * ROW_HEIGHT,
             },
-            style: { ...baseStyle, background: FILE_BG },
+            style: { ...baseStyle, background: FILE_BG, ...highlightStyle(n.id) },
         }));
 
         const filesRows = Math.ceil(files.length / COLS);
@@ -131,23 +153,36 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
                     refCountByNodeId.get(n.id) ?? 0,
                     maxRefCount,
                 ),
+                ...highlightStyle(n.id),
             },
         }));
 
         return [...fileNodes, ...symbolNodes];
-    }, [visibleDomainNodes, refCountByNodeId]);
+    }, [visibleDomainNodes, refCountByNodeId, highlightedIds]);
 
     const flowEdges = useMemo<GraphRFEdge[]>(() => {
-        return visibleDomainEdges.map((e) => ({
-            id: e.id,
-            source: e.from,
-            target: e.to,
-            label: e.kind,
-            style: {
-                stroke: e.kind === "defines" ? "#6366f1" : "#94a3b8",
-            },
-        }));
-    }, [visibleDomainEdges]);
+        return visibleDomainEdges.map((e) => {
+            const highlighted =
+                highlightedIds.has(e.from) && highlightedIds.has(e.to);
+            const color = highlighted
+                ? "#2563eb"
+                : e.kind === "defines"
+                  ? "#a5b4fc"
+                  : "#cbd5e1";
+            return {
+                id: e.id,
+                source: e.from,
+                target: e.to,
+                style: { stroke: color },
+                markerEnd: {
+                    type: MarkerType.ArrowClosed,
+                    color,
+                    width: 32,
+                    height: 32,
+                },
+            };
+        });
+    }, [visibleDomainEdges, highlightedIds]);
 
     const [nodes, setNodes, onNodesChange] =
         useNodesState<GraphRFNode>(flowNodes);
@@ -176,8 +211,12 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 onNodeClick={(_, node) => {
+                    setSelectedNodeId((prev) =>
+                        prev === node.id ? null : node.id,
+                    );
                     onNodeSelect(node.data.domainNode);
                 }}
+                onPaneClick={() => setSelectedNodeId(null)}
                 nodesDraggable
             />
         </div>
