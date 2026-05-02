@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useGraph } from './hooks/useGraph'
-import { GraphCanvas } from './components/GraphCanvas'
+import { GraphCanvas } from './components/GraphCanvas/GraphCanvas'
 import { CodeViewerPanel } from './components/CodeViewerPanel'
 import { SymbolFilter } from './components/SymbolFilter'
 import type { Node } from './schemas/api'

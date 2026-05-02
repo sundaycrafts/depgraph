@@ -11,7 +11,8 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import "@xyflow/react/dist/style.css";
 
-import type { Graph, Node as DomainNode } from "../schemas/api";
+import type { Graph, Node as DomainNode } from "../../schemas/api";
+import { useGroupDrag } from "./useGroupDrag";
 
 interface Props {
     graph: Graph;
@@ -24,7 +25,7 @@ type GraphNodeData = {
     domainNode: DomainNode;
 };
 
-type GraphRFNode = RFNode<GraphNodeData>;
+export type GraphRFNode = RFNode<GraphNodeData>;
 type GraphRFEdge = RFEdge;
 
 const FILE_BG = "#dbeafe";
@@ -190,7 +191,13 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
         useEdgesState<GraphRFEdge>(flowEdges);
 
     useEffect(() => {
-        setNodes(flowNodes);
+        setNodes((current) => {
+            const posMap = new Map(current.map((n) => [n.id, n.position]));
+            return flowNodes.map((n) => ({
+                ...n,
+                position: posMap.get(n.id) ?? n.position,
+            }));
+        });
     }, [flowNodes, setNodes]);
 
     useEffect(() => {
@@ -202,6 +209,9 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
             fitView({ padding: 0.2 });
         });
     }, [nodes.length, edges.length, fitView]);
+
+    const { onNodeDragStart, onNodeDrag, onNodeDragStop } =
+        useGroupDrag(highlightedIds);
 
     return (
         <div style={{ width: "100%", height: "100%" }}>
@@ -217,6 +227,9 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
                     onNodeSelect(node.data.domainNode);
                 }}
                 onPaneClick={() => setSelectedNodeId(null)}
+                onNodeDragStart={onNodeDragStart}
+                onNodeDrag={onNodeDrag}
+                onNodeDragStop={onNodeDragStop}
                 nodesDraggable
             />
         </div>
