@@ -6,9 +6,6 @@ A CLI tool that visualizes source code dependency graphs in your browser using L
 
 ## Try it out
 
-> [!NOTE]
-> Currently, I only tested it with Go project.
-
 ```sh
 curl -L -o depgraph https://github.com/sundaycrafts/depgraph/releases/latest/download/<release_binary>
 ./depgraph <project root> --exclude=<grob pattern>

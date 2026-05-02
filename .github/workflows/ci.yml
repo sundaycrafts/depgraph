@@ -15,9 +15,16 @@ jobs:
         with:
           go-version-file: core/go.mod
           cache-dependency-path: core/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install TypeScript language server
+        run: npm install -g typescript-language-server typescript
+      - name: Install rust-analyzer
+        run: rustup component add rust-analyzer
       - run: go vet ./...
         working-directory: core
-      - run: go test ./...
+      - run: go test -timeout 7m ./...
         working-directory: core
 
   test-web:
