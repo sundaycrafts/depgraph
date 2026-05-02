@@ -1,6 +1,6 @@
 import { render } from '@testing-library/react'
 import { describe, it } from 'vitest'
-import { GraphCanvas } from './GraphCanvas'
+import { GraphCanvas } from './GraphCanvas/GraphCanvas'
 
 describe('GraphCanvas', () => {
   it('renders without crashing on empty graph', () => {

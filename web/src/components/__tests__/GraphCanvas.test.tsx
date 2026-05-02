@@ -1,5 +1,5 @@
 import { render } from '@testing-library/react'
-import { GraphCanvas } from '../GraphCanvas'
+import { GraphCanvas } from '../GraphCanvas/GraphCanvas'
 import type { Graph } from '../../schemas/api'
 
 const emptyGraph: Graph = { nodes: [], edges: [] }
