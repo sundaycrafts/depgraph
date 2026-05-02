@@ -33,9 +33,9 @@ const SYMBOL_BASE_HSL = { h: 53, s: 96, l: 88 } as const; // #fef9c3
 const SYMBOL_HOT_HSL = { h: 0, s: 85, l: 82 } as const; // max-references red
 const HIGHLIGHT_BG = "#93c5fd"; // blue-300 — more vivid than file-node blue (#dbeafe)
 const COLS = 6;
-const COL_WIDTH = 200;
-const ROW_HEIGHT = 100;
-const FILE_SYMBOL_GAP = 40;
+const COL_WIDTH = 160;
+const ROW_HEIGHT = 36;
+const FILE_SYMBOL_GAP = 10;
 
 // symbolBg interpolates the symbol node background from yellow toward red as
 // the incoming reference count grows. Hue is the dominant change; saturation
@@ -136,7 +136,11 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
                 x: (i % COLS) * COL_WIDTH,
                 y: Math.floor(i / COLS) * ROW_HEIGHT,
             },
-            style: { ...baseStyle, background: FILE_BG, ...highlightStyle(n.id) },
+            style: {
+                ...baseStyle,
+                background: FILE_BG,
+                ...highlightStyle(n.id),
+            },
         }));
 
         const filesRows = Math.ceil(files.length / COLS);
