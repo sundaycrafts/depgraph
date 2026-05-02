@@ -153,14 +153,15 @@ func (a *Adapter) handleToolCall(raw json.RawMessage) (any, *rpcErr) {
 		b, _ := json.Marshal(nodes)
 		text = string(b)
 
-	case "list_symbols":
-		var symbols []domain.Node
-		for _, n := range a.graph.Nodes {
-			if n.Kind == domain.NodeKindSymbol {
-				symbols = append(symbols, n)
-			}
+	case "find_symbols":
+		var args struct {
+			Query string `json:"query"`
 		}
-		b, _ := json.Marshal(symbols)
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return nil, &rpcErr{Code: -32602, Message: "invalid params"}
+		}
+		nodes := a.findSymbols(args.Query)
+		b, _ := json.Marshal(nodes)
 		text = string(b)
 
 	case "read_file":
@@ -183,6 +184,32 @@ func (a *Adapter) handleToolCall(raw json.RawMessage) (any, *rpcErr) {
 	return map[string]any{
 		"content": []map[string]any{{"type": "text", "text": text}},
 	}, nil
+}
+
+// findSymbols returns all symbol nodes whose Label fuzzy-matches query.
+// An empty query returns all symbols.
+func (a *Adapter) findSymbols(query string) []domain.Node {
+	var result []domain.Node
+	for _, n := range a.graph.Nodes {
+		if n.Kind == domain.NodeKindSymbol && fuzzyMatch(query, n.Label) {
+			result = append(result, n)
+		}
+	}
+	return result
+}
+
+// fuzzyMatch reports whether all runes of query appear in target in order
+// (case-insensitive). An empty query matches everything.
+func fuzzyMatch(query, target string) bool {
+	query = strings.ToLower(query)
+	target = strings.ToLower(target)
+	qi := 0
+	for _, c := range target {
+		if qi < len(query) && rune(query[qi]) == c {
+			qi++
+		}
+	}
+	return qi == len(query)
 }
 
 // findReferences performs BFS upstream: given a symbol ID, returns all nodes
@@ -235,11 +262,17 @@ func toolDefinitions() []map[string]any {
 			},
 		},
 		{
-			"name":        "list_symbols",
-			"description": "List all symbols in the dependency graph with their IDs, labels, kinds, and file paths.",
+			"name":        "find_symbols",
+			"description": "Search for symbols in the dependency graph by name using fuzzy matching. Returns matching symbols with their IDs, labels, kinds, and file paths. Use the returned ID with find_references.",
 			"inputSchema": map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{
+						"type":        "string",
+						"description": "Fuzzy search query matched against symbol names (case-insensitive subsequence match). Empty string returns all symbols.",
+					},
+				},
+				"required": []string{"query"},
 			},
 		},
 		{

@@ -152,7 +152,7 @@ func TestServe_ToolsList(t *testing.T) {
 		m, _ := tool.(map[string]any)
 		names = append(names, m["name"].(string))
 	}
-	for _, want := range []string{"find_references", "list_symbols", "read_file"} {
+	for _, want := range []string{"find_references", "find_symbols", "read_file"} {
 		found := false
 		for _, n := range names {
 			if n == want {
@@ -193,6 +193,93 @@ func TestServe_FindReferences(t *testing.T) {
 	text, _ := item["text"].(string)
 	if !strings.Contains(text, "Alpha") {
 		t.Errorf("expected Alpha in find_references result, got: %s", text)
+	}
+}
+
+func TestFuzzyMatch(t *testing.T) {
+	cases := []struct {
+		query, target string
+		want          bool
+	}{
+		{"add", "add", true},
+		{"ad", "add", true},
+		{"ADD", "add", true},
+		{"add", "ADD", true},
+		{"", "anything", true},
+		{"", "", true},
+		{"abc", "aXbXc", true},
+		{"zzz", "add", false},
+		{"addd", "add", false},
+	}
+	for _, tc := range cases {
+		if got := fuzzyMatch(tc.query, tc.target); got != tc.want {
+			t.Errorf("fuzzyMatch(%q, %q) = %v, want %v", tc.query, tc.target, got, tc.want)
+		}
+	}
+}
+
+func TestFindSymbols(t *testing.T) {
+	graph := domain.Graph{
+		Nodes: []domain.Node{
+			{ID: "1", Kind: domain.NodeKindSymbol, Label: "add"},
+			{ID: "2", Kind: domain.NodeKindSymbol, Label: "double"},
+			{ID: "3", Kind: domain.NodeKindFile, Label: "lib.rs"},
+		},
+	}
+	a := newWithIO(graph, &stubEditor{}, &bytes.Buffer{}, &bytes.Buffer{})
+
+	assertIDs := func(t *testing.T, query string, wantIDs ...string) {
+		t.Helper()
+		nodes := a.findSymbols(query)
+		got := make(map[string]bool, len(nodes))
+		for _, n := range nodes {
+			got[n.ID] = true
+		}
+		for _, id := range wantIDs {
+			if !got[id] {
+				t.Errorf("query=%q: expected ID %q in result %v", query, id, got)
+			}
+		}
+		if len(nodes) != len(wantIDs) {
+			t.Errorf("query=%q: got %d results, want %d", query, len(nodes), len(wantIDs))
+		}
+	}
+
+	assertIDs(t, "add", "1")
+	assertIDs(t, "ad", "1")
+	assertIDs(t, "ADD", "1")
+	assertIDs(t, "dbl", "2")  // d→o→u→b→l matches subsequence
+	assertIDs(t, "", "1", "2") // empty: all symbols (not files)
+	assertIDs(t, "zzz")        // no match
+}
+
+func TestServe_FindSymbols(t *testing.T) {
+	graph := domain.Graph{
+		Nodes: []domain.Node{
+			{ID: "sym-add", Kind: domain.NodeKindSymbol, Label: "add"},
+			{ID: "sym-double", Kind: domain.NodeKindSymbol, Label: "double"},
+		},
+	}
+	inPR, inPW := io.Pipe()
+	outPR, outPW := io.Pipe()
+	a := newWithIO(graph, &stubEditor{}, inPR, outPW)
+
+	resp := serveOne(t, a, inPW, outPR,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_symbols","arguments":{"query":"ad"}}}`,
+	)
+
+	result, _ := resp["result"].(map[string]any)
+	content, _ := result["content"].([]any)
+	if len(content) == 0 {
+		t.Fatal("expected content in result")
+	}
+	item, _ := content[0].(map[string]any)
+	text, _ := item["text"].(string)
+	if !strings.Contains(text, "sym-add") {
+		t.Errorf("expected sym-add in find_symbols result, got: %s", text)
+	}
+	if strings.Contains(text, "sym-double") {
+		t.Errorf("sym-double should not match query 'ad', got: %s", text)
 	}
 }
 
