@@ -178,6 +178,9 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
                 id: e.id,
                 source: e.from,
                 target: e.to,
+                selectable: false,
+                focusable: false,
+                interactionWidth: 0,
                 style: { stroke: color },
                 markerEnd: {
                     type: MarkerType.ArrowClosed,
