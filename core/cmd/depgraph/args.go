@@ -16,13 +16,16 @@ func (s *stringSlice) Set(v string) error { *s = append(*s, v); return nil }
 type cliArgs struct {
 	root     string
 	excludes []string
+	mcp      bool
 }
 
 func parseArgs() cliArgs {
 	var excludes stringSlice
+	var mcpMode bool
 	flag.Var(&excludes, "exclude", "glob pattern relative to <target-dir> to exclude (repeatable)")
+	flag.BoolVar(&mcpMode, "mcp", false, "run as MCP stdio server instead of HTTP server")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: depgraph <target-dir> [--exclude=<glob>]...")
+		fmt.Fprintln(os.Stderr, "usage: depgraph <target-dir> [--exclude=<glob>]... [--mcp]")
 		flag.PrintDefaults()
 	}
 
@@ -48,5 +51,6 @@ func parseArgs() cliArgs {
 	return cliArgs{
 		root:     args[0],
 		excludes: excludes,
+		mcp:      mcpMode,
 	}
 }

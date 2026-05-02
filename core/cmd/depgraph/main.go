@@ -13,6 +13,8 @@ import (
 	fsadapter "github.com/sundaycrafts/depgraph/internal/adapters/fs"
 	httpadapter "github.com/sundaycrafts/depgraph/internal/adapters/http"
 	lspadapter "github.com/sundaycrafts/depgraph/internal/adapters/lsp"
+	mcpadapter "github.com/sundaycrafts/depgraph/internal/adapters/mcp"
+	"github.com/sundaycrafts/depgraph/internal/ports"
 )
 
 var version = "dev"
@@ -33,15 +35,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := httpadapter.New(graph, editor,
-		httpadapter.WithOnReady(func(addr string) {
-			fmt.Printf("depgraph %s — serving %s\n", version, addr)
-			go func() {
-				time.Sleep(300 * time.Millisecond)
-				openBrowser(addr)
-			}()
-		}),
-	)
+	var server ports.ServerPort
+	if parsed.mcp {
+		server = mcpadapter.New(graph, editor)
+	} else {
+		server = httpadapter.New(graph, editor,
+			httpadapter.WithOnReady(func(addr string) {
+				fmt.Printf("depgraph %s — serving %s\n", version, addr)
+				go func() {
+					time.Sleep(300 * time.Millisecond)
+					openBrowser(addr)
+				}()
+			}),
+		)
+	}
 
 	if err := server.Serve(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)

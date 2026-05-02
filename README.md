@@ -112,6 +112,47 @@ make dev TARGET_DIR=$PWD/core DEPGRAPH_ARGS='--exclude=**/*_test.go --exclude=ve
 
 ---
 
+## MCP Server Mode
+
+depgraph can run as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) stdio server, letting AI assistants like Claude query the dependency graph directly.
+
+```sh
+depgraph <target-dir> --mcp [--exclude <glob>]...
+```
+
+The `--mcp` flag skips the HTTP server and browser. Analysis runs once at startup; the process then waits for JSON-RPC requests on stdin and writes responses to stdout.
+
+### Tools
+
+| Tool | Arguments | Description |
+|---|---|---|
+| `list_symbols` | — | List all symbols with their IDs, kinds, and file paths |
+| `find_references` | `symbol_id: string` | Recursively find all symbols that (transitively) reference the given symbol |
+| `read_file` | `path: string` | Read the contents of a source file |
+
+### Claude Code integration
+
+Add to your `~/.claude/settings.json` (or `.claude/settings.json` for a project-scoped config):
+
+```json
+{
+  "mcpServers": {
+    "depgraph": {
+      "command": "/path/to/depgraph",
+      "args": ["<target-dir>", "--mcp"]
+    }
+  }
+}
+```
+
+Then in Claude Code you can ask things like:
+
+> "Which functions transitively call `Analyze`?"
+
+Claude will call `list_symbols` to look up the ID, then `find_references` to walk the caller chain.
+
+---
+
 ## Releasing
 
 1. Merge all changes to `main` and verify CI passes.
