@@ -6,16 +6,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/sundaycrafts/depgraph/gen"
 	httpadapter "github.com/sundaycrafts/depgraph/internal/adapters/http"
 	"github.com/sundaycrafts/depgraph/internal/domain"
 	"github.com/sundaycrafts/depgraph/internal/ports"
-	"github.com/sundaycrafts/depgraph/gen"
 )
 
 // fixture creates a temp directory with two Go source files and returns its path.
@@ -86,7 +87,7 @@ func TestGetGraph_ReturnsValidGraph(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /graph: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -145,7 +146,7 @@ func TestGetGraph_EdgeKindsAndConfidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /graph: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	var g gen.Graph
 	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
@@ -175,7 +176,7 @@ func TestGetFile_ReturnsContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /file: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -201,7 +202,7 @@ func TestGetFile_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /file: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
@@ -223,7 +224,7 @@ func TestGetFile_MissingPathParam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /file (no param): %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
@@ -239,7 +240,7 @@ func TestGetFile_PathTraversal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /file: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	// The FS adapter blocks traversal — expect 4xx, not 200.
 	if resp.StatusCode == http.StatusOK {
@@ -256,8 +257,13 @@ func TestServer_GracefulShutdown(t *testing.T) {
 		return string(data), err
 	})
 
-	// Use :0 to let the OS pick a free port.
-	adapter := httpadapter.New(graph, fsEditor, httpadapter.WithAddr(":0"))
+	// Use :0 to let the OS pick a free port, then hand the listener to the
+	// adapter so it doesn't try to bind 8080 during tests.
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := httpadapter.New(graph, fsEditor, httpadapter.WithListener(ln))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
