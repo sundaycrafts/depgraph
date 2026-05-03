@@ -18,17 +18,20 @@ type cliArgs struct {
 	excludes []string
 	mcp      bool
 	verbose  bool
+	noCache  bool
 }
 
 func parseArgs() cliArgs {
 	var excludes stringSlice
 	var mcpMode bool
 	var verbose bool
+	var noCache bool
 	flag.Var(&excludes, "exclude", "glob pattern relative to <target-dir> to exclude (repeatable)")
 	flag.BoolVar(&mcpMode, "mcp", false, "run as MCP stdio server instead of HTTP server")
 	flag.BoolVar(&verbose, "verbose", false, "enable verbose (debug-level) logging")
+	flag.BoolVar(&noCache, "no-cache", false, "bypass the on-disk graph cache and re-run analysis")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: depgraph <target-dir> [--exclude=<glob>]... [--mcp] [--verbose]")
+		fmt.Fprintln(os.Stderr, "usage: depgraph <target-dir> [--exclude=<glob>]... [--mcp] [--verbose] [--no-cache]")
 		flag.PrintDefaults()
 	}
 
@@ -56,5 +59,6 @@ func parseArgs() cliArgs {
 		excludes: excludes,
 		mcp:      mcpMode,
 		verbose:  verbose,
+		noCache:  noCache,
 	}
 }

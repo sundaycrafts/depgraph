@@ -15,6 +15,7 @@ import (
 	httpadapter "github.com/sundaycrafts/depgraph/internal/adapters/http"
 	lspadapter "github.com/sundaycrafts/depgraph/internal/adapters/lsp"
 	mcpadapter "github.com/sundaycrafts/depgraph/internal/adapters/mcp"
+	"github.com/sundaycrafts/depgraph/internal/cache"
 	"github.com/sundaycrafts/depgraph/internal/ports"
 )
 
@@ -33,10 +34,20 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	analyzer := lspadapter.New(
+	var analyzer ports.AnalyzerPort = lspadapter.New(
 		lspadapter.WithExcludeGlobs(parsed.excludes...),
 		lspadapter.WithLogger(slog.Default()),
 	)
+	cacheOpts := []cache.Option{
+		cache.WithVersion(version),
+		cache.WithExcludes(parsed.excludes),
+		cache.WithLogger(slog.Default()),
+	}
+	if parsed.noCache {
+		cacheOpts = append(cacheOpts, cache.WithDisabled())
+	}
+	analyzer = cache.New(analyzer, cacheOpts...)
+
 	editor := fsadapter.New(root)
 
 	slog.Info("analyzing", "root", root)
