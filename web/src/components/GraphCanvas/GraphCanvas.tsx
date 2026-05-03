@@ -6,13 +6,17 @@ import {
     useNodesState,
     useReactFlow,
     type Edge as RFEdge,
-    type Node as RFNode,
 } from "@xyflow/react";
 import { useEffect, useMemo, useState } from "react";
 import "@xyflow/react/dist/style.css";
 
 import type { Graph, Node as DomainNode } from "../../schemas/api";
 import { selectVisibleNodes } from "../../lib/visibleNodes";
+import {
+    FolderGroupNode,
+    type FolderGroupNodeType,
+} from "./FolderGroupNode";
+import { EntityNode, type EntityNodeType } from "./EntityNode";
 
 interface Props {
     graph: Graph;
@@ -22,31 +26,28 @@ interface Props {
     searchQuery?: string;
 }
 
-type GraphNodeData = {
-    label: string;
-    domainNode: DomainNode;
-};
-
-export type GraphRFNode = RFNode<GraphNodeData>;
+export type GraphRFNode = FolderGroupNodeType | EntityNodeType;
 type GraphRFEdge = RFEdge;
 
-const FILE_BG = "#dbeafe";
 const SYMBOL_BASE_HSL = { h: 53, s: 96, l: 88 } as const; // #fef9c3
 const SYMBOL_HOT_HSL = { h: 0, s: 85, l: 82 } as const; // max-references red
-const HIGHLIGHT_BG = "#93c5fd"; // blue-300 — more vivid than file-node blue (#dbeafe)
-const SEARCH_MATCH_BG = "#bae6fd"; // sky-200 — a lighter blue, distinct from selection HIGHLIGHT_BG
+const HIGHLIGHT_BG = "#93c5fd"; // blue-300 — selection
+const SEARCH_MATCH_BG = "#bae6fd"; // sky-200 — search match (lighter, distinct from selection)
 const COLS = 8;
 const INITIAL_ZOOM = 0.5;
 const MIN_ZOOM = 0.2;
-// Layout grid: NODE_W/NODE_H are the assumed node body sizes; GAP is the
-// inter-node whitespace, fixed at 10% of NODE_H. COL_WIDTH / ROW_HEIGHT /
-// FILE_SYMBOL_GAP all derive from the same GAP so spacing stays consistent.
 const NODE_W = 150;
 const NODE_H = 48;
 const GAP = Math.max(4, Math.round(NODE_H * 0.1));
 const COL_WIDTH = NODE_W + GAP;
 const ROW_HEIGHT = NODE_H + GAP;
-const FILE_SYMBOL_GAP = GAP;
+// Folder-group container layout.
+const FOLDER_HEADER_H = 18;
+const FOLDER_PADDING = 6;
+const FOLDER_GAP = GAP * 2;
+// Soft cap on a row's total folder width before wrapping. Sized so the
+// canvas can pack a handful of typical-width folders side by side.
+const ROW_WIDTH_BUDGET = COLS * 4 * COL_WIDTH;
 
 // symbolBg picks a symbol node background based on its incoming reference
 // count: zero → white (no dependants), one → base (yellow), interpolating
@@ -96,6 +97,34 @@ function gatherDependants(
     return result;
 }
 
+function dirname(path: string): string {
+    const i = path.lastIndexOf("/");
+    return i >= 0 ? path.slice(0, i) : "";
+}
+
+function basename(path: string): string {
+    const i = path.lastIndexOf("/");
+    return i >= 0 ? path.slice(i + 1) : path;
+}
+
+// commonFolderPrefix takes the longest folder path and trims one trailing
+// path segment at a time until every folder starts with the result. The
+// returned prefix always ends with "/" (or is empty when nothing's shared).
+function commonFolderPrefix(folders: string[]): string {
+    if (folders.length === 0) return "";
+    let candidate = folders[0];
+    for (const f of folders) if (f.length > candidate.length) candidate = f;
+    while (candidate.length > 0) {
+        if (folders.every((f) => f === candidate || f.startsWith(candidate + "/"))) {
+            return candidate + "/";
+        }
+        const lastSlash = candidate.lastIndexOf("/");
+        if (lastSlash < 0) break;
+        candidate = candidate.slice(0, lastSlash);
+    }
+    return "";
+}
+
 function GraphCanvasInner({
     graph,
     onNodeSelect,
@@ -103,8 +132,16 @@ function GraphCanvasInner({
     limitNodes = false,
     searchQuery = "",
 }: Props) {
-    const { fitView } = useReactFlow<GraphRFNode, GraphRFEdge>();
+    const { fitView, getInternalNode } = useReactFlow<
+        GraphRFNode,
+        GraphRFEdge
+    >();
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+
+    const nodeTypes = useMemo(
+        () => ({ folderGroup: FolderGroupNode, entityNode: EntityNode }),
+        [],
+    );
 
     const visibleDomainNodes = useMemo(
         () => selectVisibleNodes(graph, selectedKinds, limitNodes),
@@ -113,7 +150,6 @@ function GraphCanvasInner({
 
     const visibleDomainEdges = useMemo(() => {
         const visibleIds = new Set(visibleDomainNodes.map((n) => n.id));
-
         return graph.edges.filter(
             (e) => visibleIds.has(e.from) && visibleIds.has(e.to),
         );
@@ -193,100 +229,167 @@ function GraphCanvasInner({
     }, [visibleDomainNodes, visibleDomainEdges, refCountByNodeId]);
 
     const flowNodes = useMemo<GraphRFNode[]>(() => {
-        const baseStyle = {
-            border: "1px solid #94a3b8",
-            borderRadius: "6px",
-            fontSize: "12px",
-            padding: "4px 8px",
-            width: NODE_W,
-            height: NODE_H,
-            whiteSpace: "normal" as const,
-            overflowWrap: "anywhere" as const,
-            lineHeight: 1.2,
-            overflow: "hidden" as const,
-        };
-        const highlightStyle = (id: string) =>
-            highlightedIds.has(id) ? { background: HIGHLIGHT_BG } : {};
-        const searchMatchStyle = (id: string) =>
-            searchMatchedIds.has(id) ? { background: SEARCH_MATCH_BG } : {};
+        // File nodes are subsumed by the folder grouping; only render symbols.
+        const symbols = visibleDomainNodes.filter((n) => n.kind === "symbol");
 
-        const files = visibleDomainNodes.filter((n) => n.kind === "file");
-        // Two-stage symbol order:
-        //   Stage 1 — local clustering: place each symbol next to the dependee
-        //   it points at most strongly (anchorByNodeId) so dependants of the
-        //   same anchor land adjacent.
-        //   Stage 2 — global push-down: stable-sort the whole sequence by own
-        //   refCount ascending. Hot nodes (high refCount) end up at the very
-        //   bottom; within a same-refCount tier the stage-1 clustering is
-        //   preserved by sort stability.
-        const stage1 = visibleDomainNodes
-            .filter((n) => n.kind === "symbol")
-            .slice()
-            .sort((a, b) => {
+        // Group symbols by their containing folder (path minus filename, no
+        // nesting — siblings only).
+        const byFolder = new Map<string, DomainNode[]>();
+        for (const n of symbols) {
+            const folder = dirname(n.path ?? "");
+            const arr = byFolder.get(folder) ?? [];
+            arr.push(n);
+            byFolder.set(folder, arr);
+        }
+
+        // Compute the longest path prefix shared by every folder so we can
+        // shorten display labels to "@/<rest>". Stable across filter changes
+        // would require running this on all nodes, but per-frame on visible
+        // is fine — folders rarely change drastically across filter toggles.
+        const sharedPrefix = commonFolderPrefix(Array.from(byFolder.keys()));
+
+        // Two-stage sort applied per folder:
+        //   Stage 1 — local clustering by anchor (dependee with the highest
+        //   refCount), so dependants of the same anchor land adjacent.
+        //   Stage 2 — stable sort by own refCount ASC, pushing hot symbols
+        //   to the bottom of the folder while preserving stage-1 adjacency
+        //   within a tier.
+        const sortMembers = (members: DomainNode[]): DomainNode[] => {
+            const stage1 = members.slice().sort((a, b) => {
                 const aAnchor = anchorByNodeId.get(a.id) ?? a.id;
                 const bAnchor = anchorByNodeId.get(b.id) ?? b.id;
                 const aGroup = refCountByNodeId.get(aAnchor) ?? 0;
                 const bGroup = refCountByNodeId.get(bAnchor) ?? 0;
                 if (aGroup !== bGroup) return aGroup - bGroup;
-                if (aAnchor !== bAnchor) return aAnchor < bAnchor ? -1 : 1;
-                // Within the same anchor group, the anchor itself sits last.
+                if (aAnchor !== bAnchor)
+                    return aAnchor < bAnchor ? -1 : 1;
                 const aIsAnchor = aAnchor === a.id ? 1 : 0;
                 const bIsAnchor = bAnchor === b.id ? 1 : 0;
                 return aIsAnchor - bIsAnchor;
             });
+            const stage1Index = new Map<string, number>();
+            stage1.forEach((n, i) => stage1Index.set(n.id, i));
+            return stage1.slice().sort((a, b) => {
+                const aR = refCountByNodeId.get(a.id) ?? 0;
+                const bR = refCountByNodeId.get(b.id) ?? 0;
+                if (aR !== bR) return aR - bR;
+                return (
+                    (stage1Index.get(a.id) ?? 0) -
+                    (stage1Index.get(b.id) ?? 0)
+                );
+            });
+        };
 
-        const stage1Index = new Map<string, number>();
-        stage1.forEach((n, i) => stage1Index.set(n.id, i));
+        // Order folders lexicographically by path: a parent folder's path is
+        // a prefix of its descendants', so this naturally yields parent →
+        // nested traversal. Top-level ordering ends up alphabetical, which
+        // the user has said is fine.
+        const orderedFolders = Array.from(byFolder.entries())
+            .map(([folder, members]) => ({
+                folder,
+                members: sortMembers(members),
+            }))
+            .sort((a, b) => a.folder.localeCompare(b.folder));
 
-        const symbols = stage1.slice().sort((a, b) => {
-            const aR = refCountByNodeId.get(a.id) ?? 0;
-            const bR = refCountByNodeId.get(b.id) ?? 0;
-            if (aR !== bR) return aR - bR;
-            return (stage1Index.get(a.id) ?? 0) - (stage1Index.get(b.id) ?? 0);
-        });
-
+        // Global maxRefCount drives the symbol color gradient — kept across
+        // folders so a hot node looks the same regardless of its neighborhood.
         let maxRefCount = 0;
         for (const n of symbols) {
             const c = refCountByNodeId.get(n.id) ?? 0;
             if (c > maxRefCount) maxRefCount = c;
         }
 
-        const fileNodes: GraphRFNode[] = files.map((n, i) => ({
-            id: n.id,
-            data: { label: n.label, domainNode: n },
-            position: {
-                x: (i % COLS) * COL_WIDTH,
-                y: Math.floor(i / COLS) * ROW_HEIGHT,
-            },
-            style: {
-                ...baseStyle,
-                background: FILE_BG,
-                ...searchMatchStyle(n.id),
-                ...highlightStyle(n.id),
-            },
-        }));
+        // Shelf-pack folder boxes left→right, wrapping when the row budget
+        // is full. Row height = max folder height in that row.
+        const placed: Array<{
+            folder: string;
+            members: DomainNode[];
+            cols: number;
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        }> = [];
+        let cursorX = 0;
+        let cursorY = 0;
+        let rowMaxH = 0;
+        for (const { folder, members } of orderedFolders) {
+            const cols = Math.min(COLS, members.length);
+            const rows = Math.ceil(members.length / cols);
+            const width = cols * COL_WIDTH + 2 * FOLDER_PADDING;
+            const height =
+                FOLDER_HEADER_H + rows * ROW_HEIGHT + 2 * FOLDER_PADDING;
+            if (cursorX > 0 && cursorX + width > ROW_WIDTH_BUDGET) {
+                cursorY += rowMaxH + FOLDER_GAP;
+                cursorX = 0;
+                rowMaxH = 0;
+            }
+            placed.push({
+                folder,
+                members,
+                cols,
+                width,
+                height,
+                x: cursorX,
+                y: cursorY,
+            });
+            cursorX += width + FOLDER_GAP;
+            if (height > rowMaxH) rowMaxH = height;
+        }
 
-        const filesRows = Math.ceil(files.length / COLS);
-        const symbolsYOffset = filesRows * ROW_HEIGHT + FILE_SYMBOL_GAP;
-        const symbolNodes: GraphRFNode[] = symbols.map((n, i) => ({
-            id: n.id,
-            data: { label: n.label, domainNode: n },
-            position: {
-                x: (i % COLS) * COL_WIDTH,
-                y: symbolsYOffset + Math.floor(i / COLS) * ROW_HEIGHT,
-            },
-            style: {
-                ...baseStyle,
-                background: symbolBg(
-                    refCountByNodeId.get(n.id) ?? 0,
-                    maxRefCount,
-                ),
-                ...searchMatchStyle(n.id),
-                ...highlightStyle(n.id),
-            },
-        }));
-
-        return [...fileNodes, ...symbolNodes];
+        // Emit one folderGroup node + N entityNode children per folder.
+        // Parent must precede children in the array for React Flow.
+        const result: GraphRFNode[] = [];
+        for (const p of placed) {
+            const groupId = `folder:${p.folder}`;
+            const displayFolder = p.folder.startsWith(sharedPrefix)
+                ? `@/${p.folder.slice(sharedPrefix.length)}`
+                : p.folder;
+            result.push({
+                id: groupId,
+                type: "folderGroup",
+                position: { x: p.x, y: p.y },
+                style: { width: p.width, height: p.height },
+                data: { folder: displayFolder },
+                selectable: false,
+                // Draggable: dragging the group moves all child nodes with it
+                // (React Flow handles children-follow-parent natively).
+                draggable: true,
+            });
+            p.members.forEach((n, i) => {
+                const col = i % p.cols;
+                const row = Math.floor(i / p.cols);
+                const refCount = refCountByNodeId.get(n.id) ?? 0;
+                const isHighlighted = highlightedIds.has(n.id);
+                const isSearchMatch = searchMatchedIds.has(n.id);
+                const bg = isHighlighted
+                    ? HIGHLIGHT_BG
+                    : isSearchMatch
+                      ? SEARCH_MATCH_BG
+                      : symbolBg(refCount, maxRefCount);
+                const filename = basename(n.path ?? "");
+                result.push({
+                    id: n.id,
+                    type: "entityNode",
+                    parentId: groupId,
+                    position: {
+                        x: FOLDER_PADDING + col * COL_WIDTH,
+                        y:
+                            FOLDER_PADDING +
+                            FOLDER_HEADER_H +
+                            row * ROW_HEIGHT,
+                    },
+                    style: { width: NODE_W, height: NODE_H },
+                    data: {
+                        label: n.label,
+                        header: `(${refCount})${filename}`,
+                        bg,
+                        domainNode: n,
+                    },
+                });
+            });
+        }
+        return result;
     }, [
         visibleDomainNodes,
         refCountByNodeId,
@@ -356,21 +459,24 @@ function GraphCanvasInner({
             <ReactFlow
                 nodes={nodes}
                 edges={edges}
+                nodeTypes={nodeTypes}
                 minZoom={MIN_ZOOM}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 onNodeClick={(event, node) => {
+                    if (node.type !== "entityNode") return;
                     if (event.altKey) {
-                        // Alt+click: gather this node's dependants and stack
-                        // them in a 5-wide grid right above the clicked node,
-                        // filling bottom-up so the row closest to it fills
-                        // first. Clicked node stays in place as the anchor.
+                        // Alt+click: gather dependants and stack them above
+                        // the clicked node in a 5-wide grid (anchor stays).
+                        // Use absolute coordinates and strip parentId so the
+                        // moved nodes escape their folder boxes consistently.
                         const deps = gatherDependants(
                             node.id,
                             visibleDomainEdges,
                         );
-                        const Cx = node.position.x;
-                        const Cy = node.position.y;
+                        const internal = getInternalNode(node.id);
+                        const Cx = internal?.internals.positionAbsolute.x ?? 0;
+                        const Cy = internal?.internals.positionAbsolute.y ?? 0;
                         setNodes((nds) => {
                             const orderedDeps = nds.filter((n) =>
                                 deps.has(n.id),
@@ -387,11 +493,15 @@ function GraphCanvasInner({
                                     y: Cy - (rowFromBottom + 1) * ROW_HEIGHT,
                                 });
                             });
-                            return nds.map((n) =>
-                                newPos.has(n.id)
-                                    ? { ...n, position: newPos.get(n.id)! }
-                                    : n,
-                            );
+                            return nds.map((n) => {
+                                const p = newPos.get(n.id);
+                                if (!p) return n;
+                                return {
+                                    ...n,
+                                    parentId: undefined,
+                                    position: p,
+                                };
+                            });
                         });
                     }
                     setSelectedNodeId((prev) =>
