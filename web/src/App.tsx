@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useGraph } from './hooks/useGraph'
 import { GraphCanvas } from './components/GraphCanvas/GraphCanvas'
 import { CodeViewerPanel } from './components/CodeViewerPanel'
@@ -11,6 +11,13 @@ export default function App() {
   const [selectedNode, setSelectedNode] = useState<Node | null>(null)
   const [selectedKinds, setSelectedKinds] = useState<string[]>([])
   const [limitNodes, setLimitNodes] = useState<boolean>(true)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState('')
+
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedQuery(searchQuery), 500)
+    return () => clearTimeout(id)
+  }, [searchQuery])
 
   if (isLoading) {
     return (
@@ -50,6 +57,13 @@ export default function App() {
             selectedKinds={selectedKinds}
             onKindsChange={setSelectedKinds}
           />
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search nodes…"
+            className="text-xs border rounded px-2 py-1 w-48 shrink-0"
+          />
           <label className="flex items-center gap-1 text-xs text-gray-700 shrink-0">
             <input
               type="checkbox"
@@ -68,6 +82,7 @@ export default function App() {
             onNodeSelect={setSelectedNode}
             selectedKinds={selectedKinds}
             limitNodes={limitNodes}
+            searchQuery={debouncedQuery}
           />
         </div>
       </div>

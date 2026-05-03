@@ -19,6 +19,7 @@ interface Props {
     onNodeSelect: (node: DomainNode) => void;
     selectedKinds: string[];
     limitNodes?: boolean;
+    searchQuery?: string;
 }
 
 type GraphNodeData = {
@@ -33,7 +34,10 @@ const FILE_BG = "#dbeafe";
 const SYMBOL_BASE_HSL = { h: 53, s: 96, l: 88 } as const; // #fef9c3
 const SYMBOL_HOT_HSL = { h: 0, s: 85, l: 82 } as const; // max-references red
 const HIGHLIGHT_BG = "#93c5fd"; // blue-300 — more vivid than file-node blue (#dbeafe)
-const COLS = 6;
+const SEARCH_MATCH_BG = "#bae6fd"; // sky-200 — a lighter blue, distinct from selection HIGHLIGHT_BG
+const COLS = 8;
+const INITIAL_ZOOM = 0.5;
+const MIN_ZOOM = 0.2;
 // Layout grid: NODE_W/NODE_H are the assumed node body sizes; GAP is the
 // inter-node whitespace, fixed at 10% of NODE_H. COL_WIDTH / ROW_HEIGHT /
 // FILE_SYMBOL_GAP all derive from the same GAP so spacing stays consistent.
@@ -44,18 +48,32 @@ const COL_WIDTH = NODE_W + GAP;
 const ROW_HEIGHT = NODE_H + GAP;
 const FILE_SYMBOL_GAP = GAP;
 
-// symbolBg interpolates the symbol node background from yellow toward red as
-// the incoming reference count grows. Hue is the dominant change; saturation
-// and lightness drop only slightly so dark text stays readable.
+// symbolBg picks a symbol node background based on its incoming reference
+// count: zero → white (no dependants), one → base (yellow), interpolating
+// toward hot (red) as the count climbs to maxRefCount.
 function symbolBg(refCount: number, maxRefCount: number): string {
-    if (maxRefCount === 0) {
-        return `hsl(${SYMBOL_BASE_HSL.h}, ${SYMBOL_BASE_HSL.s}%, ${SYMBOL_BASE_HSL.l}%)`;
+    if (refCount === 0) {
+        return "#ffffff";
     }
-    const t = Math.min(refCount / maxRefCount, 1);
+    const denom = Math.max(maxRefCount - 1, 1);
+    const t = Math.min((refCount - 1) / denom, 1);
     const h = SYMBOL_BASE_HSL.h + (SYMBOL_HOT_HSL.h - SYMBOL_BASE_HSL.h) * t;
     const s = SYMBOL_BASE_HSL.s + (SYMBOL_HOT_HSL.s - SYMBOL_BASE_HSL.s) * t;
     const l = SYMBOL_BASE_HSL.l + (SYMBOL_HOT_HSL.l - SYMBOL_BASE_HSL.l) * t;
     return `hsl(${h.toFixed(1)}, ${s.toFixed(1)}%, ${l.toFixed(1)}%)`;
+}
+
+// fuzzyMatch returns true if every char of query appears in target in order
+// (case-insensitive subsequence match — the "Cmd-T" style fuzzy finder).
+function fuzzyMatch(query: string, target: string): boolean {
+    if (!query) return false;
+    const q = query.toLowerCase();
+    const t = target.toLowerCase();
+    let qi = 0;
+    for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+        if (t[ti] === q[qi]) qi++;
+    }
+    return qi === q.length;
 }
 
 // gatherDependants walks edges upstream from rootId (e.to === cur → add e.from)
@@ -83,6 +101,7 @@ function GraphCanvasInner({
     onNodeSelect,
     selectedKinds,
     limitNodes = false,
+    searchQuery = "",
 }: Props) {
     const { fitView } = useReactFlow<GraphRFNode, GraphRFEdge>();
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -117,6 +136,15 @@ function GraphCanvasInner({
         return result;
     }, [selectedNodeId, visibleDomainEdges]);
 
+    const searchMatchedIds = useMemo<Set<string>>(() => {
+        const result = new Set<string>();
+        if (!searchQuery) return result;
+        for (const n of visibleDomainNodes) {
+            if (fuzzyMatch(searchQuery, n.label)) result.add(n.id);
+        }
+        return result;
+    }, [searchQuery, visibleDomainNodes]);
+
     // Incoming "references" count per node. Computed from the full graph so
     // it stays stable as the user toggles filter chips.
     const refCountByNodeId = useMemo(() => {
@@ -127,6 +155,42 @@ function GraphCanvasInner({
         }
         return m;
     }, [graph.edges]);
+
+    // For each symbol, the dependee it should sit next to: the visible-graph
+    // outgoing-references target with the highest refCount. Falls back to the
+    // node itself when it depends on nothing visible. Used as the primary sort
+    // key so dependants land just before their hottest dependee.
+    const anchorByNodeId = useMemo(() => {
+        const m = new Map<string, string>();
+        const visibleIds = new Set(visibleDomainNodes.map((n) => n.id));
+        const outTargets = new Map<string, string[]>();
+        for (const e of visibleDomainEdges) {
+            if (e.kind !== "references") continue;
+            const arr = outTargets.get(e.from) ?? [];
+            arr.push(e.to);
+            outTargets.set(e.from, arr);
+        }
+        for (const n of visibleDomainNodes) {
+            if (n.kind !== "symbol") continue;
+            const targets = outTargets.get(n.id);
+            if (!targets || targets.length === 0) {
+                m.set(n.id, n.id);
+                continue;
+            }
+            let best = n.id;
+            let bestRef = -1;
+            for (const t of targets) {
+                if (!visibleIds.has(t)) continue;
+                const r = refCountByNodeId.get(t) ?? 0;
+                if (r > bestRef) {
+                    best = t;
+                    bestRef = r;
+                }
+            }
+            m.set(n.id, best);
+        }
+        return m;
+    }, [visibleDomainNodes, visibleDomainEdges, refCountByNodeId]);
 
     const flowNodes = useMemo<GraphRFNode[]>(() => {
         const baseStyle = {
@@ -143,16 +207,43 @@ function GraphCanvasInner({
         };
         const highlightStyle = (id: string) =>
             highlightedIds.has(id) ? { background: HIGHLIGHT_BG } : {};
+        const searchMatchStyle = (id: string) =>
+            searchMatchedIds.has(id) ? { background: SEARCH_MATCH_BG } : {};
 
         const files = visibleDomainNodes.filter((n) => n.kind === "file");
-        const symbols = visibleDomainNodes
+        // Two-stage symbol order:
+        //   Stage 1 — local clustering: place each symbol next to the dependee
+        //   it points at most strongly (anchorByNodeId) so dependants of the
+        //   same anchor land adjacent.
+        //   Stage 2 — global push-down: stable-sort the whole sequence by own
+        //   refCount ascending. Hot nodes (high refCount) end up at the very
+        //   bottom; within a same-refCount tier the stage-1 clustering is
+        //   preserved by sort stability.
+        const stage1 = visibleDomainNodes
             .filter((n) => n.kind === "symbol")
             .slice()
-            .sort(
-                (a, b) =>
-                    (refCountByNodeId.get(a.id) ?? 0) -
-                    (refCountByNodeId.get(b.id) ?? 0),
-            );
+            .sort((a, b) => {
+                const aAnchor = anchorByNodeId.get(a.id) ?? a.id;
+                const bAnchor = anchorByNodeId.get(b.id) ?? b.id;
+                const aGroup = refCountByNodeId.get(aAnchor) ?? 0;
+                const bGroup = refCountByNodeId.get(bAnchor) ?? 0;
+                if (aGroup !== bGroup) return aGroup - bGroup;
+                if (aAnchor !== bAnchor) return aAnchor < bAnchor ? -1 : 1;
+                // Within the same anchor group, the anchor itself sits last.
+                const aIsAnchor = aAnchor === a.id ? 1 : 0;
+                const bIsAnchor = bAnchor === b.id ? 1 : 0;
+                return aIsAnchor - bIsAnchor;
+            });
+
+        const stage1Index = new Map<string, number>();
+        stage1.forEach((n, i) => stage1Index.set(n.id, i));
+
+        const symbols = stage1.slice().sort((a, b) => {
+            const aR = refCountByNodeId.get(a.id) ?? 0;
+            const bR = refCountByNodeId.get(b.id) ?? 0;
+            if (aR !== bR) return aR - bR;
+            return (stage1Index.get(a.id) ?? 0) - (stage1Index.get(b.id) ?? 0);
+        });
 
         let maxRefCount = 0;
         for (const n of symbols) {
@@ -170,6 +261,7 @@ function GraphCanvasInner({
             style: {
                 ...baseStyle,
                 background: FILE_BG,
+                ...searchMatchStyle(n.id),
                 ...highlightStyle(n.id),
             },
         }));
@@ -189,12 +281,19 @@ function GraphCanvasInner({
                     refCountByNodeId.get(n.id) ?? 0,
                     maxRefCount,
                 ),
+                ...searchMatchStyle(n.id),
                 ...highlightStyle(n.id),
             },
         }));
 
         return [...fileNodes, ...symbolNodes];
-    }, [visibleDomainNodes, refCountByNodeId, highlightedIds]);
+    }, [
+        visibleDomainNodes,
+        refCountByNodeId,
+        anchorByNodeId,
+        highlightedIds,
+        searchMatchedIds,
+    ]);
 
     const flowEdges = useMemo<GraphRFEdge[]>(() => {
         return visibleDomainEdges.map((e) => {
@@ -244,7 +343,11 @@ function GraphCanvasInner({
 
     useEffect(() => {
         window.requestAnimationFrame(() => {
-            fitView({ padding: 0.2 });
+            fitView({
+                padding: 0.2,
+                minZoom: INITIAL_ZOOM,
+                maxZoom: INITIAL_ZOOM,
+            });
         });
     }, [nodes.length, edges.length, fitView]);
 
@@ -253,6 +356,7 @@ function GraphCanvasInner({
             <ReactFlow
                 nodes={nodes}
                 edges={edges}
+                minZoom={MIN_ZOOM}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 onNodeClick={(event, node) => {
