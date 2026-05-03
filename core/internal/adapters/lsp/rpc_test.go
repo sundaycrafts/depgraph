@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -27,7 +28,7 @@ func pipeConn(w io.Writer) (*conn, *io.PipeWriter, chan struct{}) {
 		n, err := w.Write(p)
 		once.Do(func() { close(sent) })
 		return n, err
-	}))
+	}), slog.New(slog.DiscardHandler))
 	return c, pw, sent
 }
 

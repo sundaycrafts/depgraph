@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -23,6 +24,7 @@ import (
 type Adapter struct {
 	locator  lsploader.Locator
 	excludes []string
+	logger   *slog.Logger
 }
 
 var _ ports.AnalyzerPort = (*Adapter)(nil)
@@ -41,9 +43,15 @@ func WithExcludeGlobs(globs ...string) Option {
 	return func(a *Adapter) { a.excludes = append(a.excludes, globs...) }
 }
 
+// WithLogger sets the logger used for analysis progress messages.
+// Defaults to slog.Default() when not provided.
+func WithLogger(l *slog.Logger) Option {
+	return func(a *Adapter) { a.logger = l }
+}
+
 // New creates an Adapter that resolves language server binaries via exec.LookPath.
 func New(opts ...Option) *Adapter {
-	a := &Adapter{locator: ExecLocator{}}
+	a := &Adapter{locator: ExecLocator{}, logger: slog.Default()}
 	for _, o := range opts {
 		o(a)
 	}
@@ -82,6 +90,9 @@ func (a *Adapter) Analyze(ctx context.Context, root string) (domain.Graph, error
 
 func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploader.Language, gb *graphBuilder) error {
 	m := lsploader.Meta(lang)
+	logger := a.logger.With("lang", string(lang))
+
+	logger.Info("starting language server", "binary", m.LSPBinary)
 
 	cmd := exec.CommandContext(ctx, m.LSPBinary, m.LSPArgs...)
 	stdin, err := cmd.StdinPipe()
@@ -99,7 +110,7 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 	}
 	defer cmd.Process.Kill() //nolint:errcheck
 
-	c := newConn(stdout, stdin)
+	c := newConn(stdout, stdin, logger)
 	go c.readLoop() //nolint:errcheck
 
 	rootURI := fileURI(root)
@@ -130,10 +141,13 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		return fmt.Errorf("find files: %w", err)
 	}
 
+	logger.Debug("collecting symbols", "files", len(files))
+
 	// Pass 1: collect all symbols and add "defines" (file→symbol) edges.
 	// Keys in fileSymbols are canonicalized so that lookups in pass 2 — which
 	// derive their key from gopls' Location.URI — match consistently.
 	fileSymbols := make(map[string][]symEntry, len(files))
+	var symCount int
 	for _, file := range files {
 		docURI := fileURI(file)
 		fileID := gb.addFileNode(file)
@@ -166,13 +180,17 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 			symID := gb.addSymbolNode(sym.Name, file, sym.Range, sym.Kind)
 			gb.addEdge(fileID, symID, domain.EdgeKindDefines, domain.ConfidenceExact)
 			fileSymbols[key] = append(fileSymbols[key], symEntry{id: symID, sym: sym})
+			symCount++
 		}
 	}
+
+	logger.Debug("symbols collected", "count", symCount)
 
 	// Pass 2: resolve references into symbol→symbol "references" edges.
 	if !initResult.Capabilities.ReferencesProvider {
 		return nil
 	}
+	logger.Debug("resolving references")
 	for _, file := range files {
 		docURI := fileURI(file)
 		key := canonPath(file)

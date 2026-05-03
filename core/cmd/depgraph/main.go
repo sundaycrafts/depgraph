@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,17 +24,28 @@ func main() {
 	parsed := parseArgs()
 	root := parsed.root
 
+	level := slog.LevelInfo
+	if parsed.verbose {
+		level = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	analyzer := lspadapter.New(lspadapter.WithExcludeGlobs(parsed.excludes...))
+	analyzer := lspadapter.New(
+		lspadapter.WithExcludeGlobs(parsed.excludes...),
+		lspadapter.WithLogger(slog.Default()),
+	)
 	editor := fsadapter.New(root)
 
+	slog.Info("analyzing", "root", root)
 	graph, err := analyzer.Analyze(ctx, root)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "analysis failed: %v\n", err)
 		os.Exit(1)
 	}
+	slog.Info("analysis complete", "nodes", len(graph.Nodes), "edges", len(graph.Edges))
 
 	var server ports.ServerPort
 	if parsed.mcp {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,9 +46,11 @@ type conn struct {
 	progFlight    int           // number of in-flight $/progress tokens
 	progBeganOnce sync.Once
 	progBeganCh   chan struct{} // closed when the first $/progress begin is received
+
+	logger *slog.Logger
 }
 
-func newConn(r io.Reader, w io.Writer) *conn {
+func newConn(r io.Reader, w io.Writer, logger *slog.Logger) *conn {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
 	scanner.Split(splitLSP)
@@ -57,6 +60,7 @@ func newConn(r io.Reader, w io.Writer) *conn {
 		scanner:     scanner,
 		pending:     make(map[int64]chan message),
 		progBeganCh: make(chan struct{}),
+		logger:      logger,
 	}
 	return c
 }
@@ -178,11 +182,14 @@ func (c *conn) waitForIdle(ctx context.Context) {
 	const maxStartupWait = 30 * time.Second
 	const poll = 200 * time.Millisecond
 
+	c.logger.Debug("waiting for language server indexing to begin")
+
 	// Phase 1: block until first $/progress begin (or timeout/cancel).
 	select {
 	case <-c.progBeganCh:
-		// at least one background task started; proceed to wait for completion
+		c.logger.Info("indexing started")
 	case <-time.After(maxStartupWait):
+		c.logger.Debug("no indexing activity detected, assuming server is ready")
 		return // no progress ever started; server is idle
 	case <-ctx.Done():
 		return
@@ -194,6 +201,7 @@ func (c *conn) waitForIdle(ctx context.Context) {
 		idle := c.progFlight <= 0
 		c.progMu.Unlock()
 		if idle {
+			c.logger.Info("indexing complete")
 			return
 		}
 		select {
