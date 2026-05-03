@@ -3,13 +3,14 @@ import { useGraph } from './hooks/useGraph'
 import { GraphCanvas } from './components/GraphCanvas/GraphCanvas'
 import { CodeViewerPanel } from './components/CodeViewerPanel'
 import { SymbolFilter } from './components/SymbolFilter'
+import { NODE_LIMIT, selectVisibleNodes } from './lib/visibleNodes'
 import type { Node } from './schemas/api'
 
 export default function App() {
   const { data: graph, isLoading, error } = useGraph()
   const [selectedNode, setSelectedNode] = useState<Node | null>(null)
   const [selectedKinds, setSelectedKinds] = useState<string[]>([])
-  const [limitToHundred, setLimitToHundred] = useState<boolean>(true)
+  const [limitNodes, setLimitNodes] = useState<boolean>(true)
 
   if (isLoading) {
     return (
@@ -29,6 +30,16 @@ export default function App() {
 
   if (!graph) return null
 
+  const visibleNodes = selectVisibleNodes(graph, selectedKinds, limitNodes)
+  const totalSymbols = graph.nodes.reduce(
+    (n, node) => n + (node.kind === 'symbol' ? 1 : 0),
+    0,
+  )
+  const visibleSymbols = visibleNodes.reduce(
+    (n, node) => n + (node.kind === 'symbol' ? 1 : 0),
+    0,
+  )
+
   return (
     <div className="flex h-screen">
       <div className="flex-1 flex flex-col min-h-0">
@@ -42,18 +53,21 @@ export default function App() {
           <label className="flex items-center gap-1 text-xs text-gray-700 shrink-0">
             <input
               type="checkbox"
-              checked={limitToHundred}
-              onChange={(e) => setLimitToHundred(e.target.checked)}
+              checked={limitNodes}
+              onChange={(e) => setLimitNodes(e.target.checked)}
             />
-            Limit to 100 nodes
+            Limit to {NODE_LIMIT.toLocaleString()} nodes
           </label>
+          <span className="ml-auto text-xs text-gray-600 shrink-0 tabular-nums">
+            Showing {visibleSymbols.toLocaleString()} / {totalSymbols.toLocaleString()} symbols
+          </span>
         </div>
         <div className="flex-1 min-h-0">
           <GraphCanvas
             graph={graph}
             onNodeSelect={setSelectedNode}
             selectedKinds={selectedKinds}
-            limitToHundred={limitToHundred}
+            limitNodes={limitNodes}
           />
         </div>
       </div>

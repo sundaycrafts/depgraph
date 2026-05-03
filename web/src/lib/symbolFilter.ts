@@ -32,7 +32,7 @@ export function kindFromLabel(label: string, lang: Language): string {
 // Default selected symbolKind values per language.
 export const PRESETS: Record<Language, string[]> = {
   go:         ['function', 'interface', 'method'],
-  typescript: ['function', 'interface', 'class', 'method'],
+  typescript: ['function', 'interface', 'class', 'method', 'constant', 'variable'],
   rust:       ['function', 'interface', 'method'],  // "interface" = trait in rust-analyzer
   default:    [],                                   // no filter
 }

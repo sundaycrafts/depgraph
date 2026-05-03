@@ -12,13 +12,14 @@ import { useEffect, useMemo, useState } from "react";
 import "@xyflow/react/dist/style.css";
 
 import type { Graph, Node as DomainNode } from "../../schemas/api";
+import { selectVisibleNodes } from "../../lib/visibleNodes";
 import { useGroupDrag } from "./useGroupDrag";
 
 interface Props {
     graph: Graph;
     onNodeSelect: (node: DomainNode) => void;
     selectedKinds: string[];
-    limitToHundred?: boolean;
+    limitNodes?: boolean;
 }
 
 type GraphNodeData = {
@@ -35,16 +36,14 @@ const SYMBOL_HOT_HSL = { h: 0, s: 85, l: 82 } as const; // max-references red
 const HIGHLIGHT_BG = "#93c5fd"; // blue-300 — more vivid than file-node blue (#dbeafe)
 const COLS = 6;
 // Layout grid: NODE_W/NODE_H are the assumed node body sizes; GAP is the
-// inter-node whitespace, fixed at 5% of NODE_H so clusters render densely
-// instead of sparsely. COL_WIDTH / ROW_HEIGHT / FILE_SYMBOL_GAP all derive
-// from the same GAP so the spacing stays consistent everywhere.
+// inter-node whitespace, fixed at 10% of NODE_H. COL_WIDTH / ROW_HEIGHT /
+// FILE_SYMBOL_GAP all derive from the same GAP so spacing stays consistent.
 const NODE_W = 150;
-const NODE_H = 30;
-const GAP = Math.max(2, Math.round(NODE_H * 0.05));
+const NODE_H = 48;
+const GAP = Math.max(4, Math.round(NODE_H * 0.1));
 const COL_WIDTH = NODE_W + GAP;
 const ROW_HEIGHT = NODE_H + GAP;
 const FILE_SYMBOL_GAP = GAP;
-const NODE_LIMIT = 100;
 
 // symbolBg interpolates the symbol node background from yellow toward red as
 // the incoming reference count grows. Hue is the dominant change; saturation
@@ -64,23 +63,15 @@ function GraphCanvasInner({
     graph,
     onNodeSelect,
     selectedKinds,
-    limitToHundred = false,
+    limitNodes = false,
 }: Props) {
     const { fitView } = useReactFlow<GraphRFNode, GraphRFEdge>();
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
-    const visibleDomainNodes = useMemo(() => {
-        const filtered = graph.nodes.filter((n) => {
-            if (n.kind === "file") {
-                return selectedKinds.includes("file");
-            }
-            return (
-                selectedKinds.length === 0 ||
-                (n.symbolKind != null && selectedKinds.includes(n.symbolKind))
-            );
-        });
-        return limitToHundred ? filtered.slice(0, NODE_LIMIT) : filtered;
-    }, [graph.nodes, selectedKinds, limitToHundred]);
+    const visibleDomainNodes = useMemo(
+        () => selectVisibleNodes(graph, selectedKinds, limitNodes),
+        [graph, selectedKinds, limitNodes],
+    );
 
     const visibleDomainEdges = useMemo(() => {
         const visibleIds = new Set(visibleDomainNodes.map((n) => n.id));
@@ -124,6 +115,12 @@ function GraphCanvasInner({
             borderRadius: "6px",
             fontSize: "12px",
             padding: "4px 8px",
+            width: NODE_W,
+            height: NODE_H,
+            whiteSpace: "normal" as const,
+            overflowWrap: "anywhere" as const,
+            lineHeight: 1.2,
+            overflow: "hidden" as const,
         };
         const highlightStyle = (id: string) =>
             highlightedIds.has(id) ? { background: HIGHLIGHT_BG } : {};

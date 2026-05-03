@@ -33,24 +33,24 @@ test('renders without crashing with nodes and edges', () => {
   render(<GraphCanvas graph={smallGraph} onNodeSelect={() => {}} selectedKinds={[]} />)
 })
 
-test('renders without crashing with 200-node graph + limitToHundred=true', () => {
+test('renders without crashing with 200-node graph + limitNodes=true', () => {
   render(
     <GraphCanvas
       graph={largeGraph}
       onNodeSelect={() => {}}
       selectedKinds={['file']}
-      limitToHundred
+      limitNodes
     />
   )
 })
 
-test('renders without crashing with 200-node graph + limitToHundred=false', () => {
+test('renders without crashing with 200-node graph + limitNodes=false', () => {
   render(
     <GraphCanvas
       graph={largeGraph}
       onNodeSelect={() => {}}
       selectedKinds={['file']}
-      limitToHundred={false}
+      limitNodes={false}
     />
   )
 })
