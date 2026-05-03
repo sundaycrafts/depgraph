@@ -142,7 +142,10 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 	// before querying symbols and references.
 	c.waitForIdle(ctx)
 
-	files, err := findFiles(root, m.FileExts, a.excludes)
+	excludes := make([]string, 0, len(m.DefaultExcludes)+len(a.excludes))
+	excludes = append(excludes, m.DefaultExcludes...)
+	excludes = append(excludes, a.excludes...)
+	files, err := findFiles(root, m.FileExts, excludes)
 	if err != nil {
 		return fmt.Errorf("find files: %w", err)
 	}
@@ -199,7 +202,11 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		}
 	}
 
-	logger.Info("symbols collected", "count", symCount, "elapsed", time.Since(pass1Start))
+	logger.Info("symbols collected",
+		"files", len(files),
+		"count", symCount,
+		"elapsed", time.Since(pass1Start),
+	)
 
 	// Pass 2: resolve references into symbol→symbol "references" edges.
 	if !initResult.Capabilities.ReferencesProvider {
@@ -241,6 +248,7 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		}
 	}
 	logger.Info("references resolved",
+		"files", len(files),
 		"edges", len(gb.edges)-edgesBefore,
 		"elapsed", time.Since(pass2Start),
 	)
