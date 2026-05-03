@@ -13,7 +13,6 @@ import "@xyflow/react/dist/style.css";
 
 import type { Graph, Node as DomainNode } from "../../schemas/api";
 import { selectVisibleNodes } from "../../lib/visibleNodes";
-import { useGroupDrag } from "./useGroupDrag";
 
 interface Props {
     graph: Graph;
@@ -57,6 +56,26 @@ function symbolBg(refCount: number, maxRefCount: number): string {
     const s = SYMBOL_BASE_HSL.s + (SYMBOL_HOT_HSL.s - SYMBOL_BASE_HSL.s) * t;
     const l = SYMBOL_BASE_HSL.l + (SYMBOL_HOT_HSL.l - SYMBOL_BASE_HSL.l) * t;
     return `hsl(${h.toFixed(1)}, ${s.toFixed(1)}%, ${l.toFixed(1)}%)`;
+}
+
+// gatherDependants walks edges upstream from rootId (e.to === cur → add e.from)
+// and returns the transitive set of ancestor node IDs, excluding rootId itself.
+function gatherDependants(
+    rootId: string,
+    edges: { from: string; to: string }[],
+): Set<string> {
+    const result = new Set<string>();
+    const queue = [rootId];
+    while (queue.length > 0) {
+        const cur = queue.shift()!;
+        for (const e of edges) {
+            if (e.to === cur && e.from !== rootId && !result.has(e.from)) {
+                result.add(e.from);
+                queue.push(e.from);
+            }
+        }
+    }
+    return result;
 }
 
 function GraphCanvasInner({
@@ -229,9 +248,6 @@ function GraphCanvasInner({
         });
     }, [nodes.length, edges.length, fitView]);
 
-    const { onNodeDragStart, onNodeDrag, onNodeDragStop } =
-        useGroupDrag(highlightedIds);
-
     return (
         <div style={{ width: "100%", height: "100%" }}>
             <ReactFlow
@@ -239,16 +255,47 @@ function GraphCanvasInner({
                 edges={edges}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
-                onNodeClick={(_, node) => {
+                onNodeClick={(event, node) => {
+                    if (event.altKey) {
+                        // Alt+click: gather this node's dependants and stack
+                        // them in a 5-wide grid right above the clicked node,
+                        // filling bottom-up so the row closest to it fills
+                        // first. Clicked node stays in place as the anchor.
+                        const deps = gatherDependants(
+                            node.id,
+                            visibleDomainEdges,
+                        );
+                        const Cx = node.position.x;
+                        const Cy = node.position.y;
+                        setNodes((nds) => {
+                            const orderedDeps = nds.filter((n) =>
+                                deps.has(n.id),
+                            );
+                            const newPos = new Map<
+                                string,
+                                { x: number; y: number }
+                            >();
+                            orderedDeps.forEach((d, i) => {
+                                const col = i % 5;
+                                const rowFromBottom = Math.floor(i / 5);
+                                newPos.set(d.id, {
+                                    x: Cx + (col - 2) * COL_WIDTH,
+                                    y: Cy - (rowFromBottom + 1) * ROW_HEIGHT,
+                                });
+                            });
+                            return nds.map((n) =>
+                                newPos.has(n.id)
+                                    ? { ...n, position: newPos.get(n.id)! }
+                                    : n,
+                            );
+                        });
+                    }
                     setSelectedNodeId((prev) =>
                         prev === node.id ? null : node.id,
                     );
                     onNodeSelect(node.data.domainNode);
                 }}
                 onPaneClick={() => setSelectedNodeId(null)}
-                onNodeDragStart={onNodeDragStart}
-                onNodeDrag={onNodeDrag}
-                onNodeDragStop={onNodeDragStop}
                 nodesDraggable
             />
         </div>
