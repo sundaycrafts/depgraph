@@ -40,12 +40,17 @@ func main() {
 	editor := fsadapter.New(root)
 
 	slog.Info("analyzing", "root", root)
+	analyzeStart := time.Now()
 	graph, err := analyzer.Analyze(ctx, root)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "analysis failed: %v\n", err)
 		os.Exit(1)
 	}
-	slog.Info("analysis complete", "nodes", len(graph.Nodes), "edges", len(graph.Edges))
+	slog.Info("analysis complete",
+		"nodes", len(graph.Nodes),
+		"edges", len(graph.Edges),
+		"elapsed", time.Since(analyzeStart),
+	)
 
 	var server ports.ServerPort
 	if parsed.mcp {

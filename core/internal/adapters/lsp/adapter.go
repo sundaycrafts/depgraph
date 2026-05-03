@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/google/uuid"
@@ -17,6 +18,9 @@ import (
 	"github.com/sundaycrafts/depgraph/internal/lsploader"
 	"github.com/sundaycrafts/depgraph/internal/ports"
 )
+
+// progressInterval is how often (in files) Pass 1/2 emit a Debug progress log.
+const progressInterval = 100
 
 // Adapter implements ports.AnalyzerPort via the Language Server Protocol.
 // It auto-detects supported languages in the target directory and dispatches
@@ -78,6 +82,8 @@ func (a *Adapter) Analyze(ctx context.Context, root string) (domain.Graph, error
 	if err := lsploader.Check(a.locator, langs); err != nil {
 		return domain.Graph{}, err
 	}
+
+	a.logger.Debug("detected languages", "langs", langs)
 
 	gb := newGraphBuilder()
 	for _, lang := range langs {
@@ -141,14 +147,15 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		return fmt.Errorf("find files: %w", err)
 	}
 
-	logger.Debug("collecting symbols", "files", len(files))
+	logger.Info("collecting symbols", "files", len(files))
+	pass1Start := time.Now()
 
 	// Pass 1: collect all symbols and add "defines" (file→symbol) edges.
 	// Keys in fileSymbols are canonicalized so that lookups in pass 2 — which
 	// derive their key from gopls' Location.URI — match consistently.
 	fileSymbols := make(map[string][]symEntry, len(files))
 	var symCount int
-	for _, file := range files {
+	for i, file := range files {
 		docURI := fileURI(file)
 		fileID := gb.addFileNode(file)
 
@@ -172,10 +179,12 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			logger.Debug("documentSymbol failed", "file", file, "err", err)
 			continue
 		}
 		syms, err := parseSymbols(raw)
 		if err != nil {
+			logger.Debug("parse symbols failed", "file", file, "err", err)
 			continue
 		}
 		key := canonPath(file)
@@ -185,16 +194,21 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 			fileSymbols[key] = append(fileSymbols[key], symEntry{id: symID, sym: sym})
 			symCount++
 		}
+		if (i+1)%progressInterval == 0 {
+			logger.Debug("symbols progress", "processed", i+1, "total", len(files))
+		}
 	}
 
-	logger.Debug("symbols collected", "count", symCount)
+	logger.Info("symbols collected", "count", symCount, "elapsed", time.Since(pass1Start))
 
 	// Pass 2: resolve references into symbol→symbol "references" edges.
 	if !initResult.Capabilities.ReferencesProvider {
 		return nil
 	}
-	logger.Debug("resolving references")
-	for _, file := range files {
+	logger.Info("resolving references")
+	pass2Start := time.Now()
+	edgesBefore := len(gb.edges)
+	for i, file := range files {
 		docURI := fileURI(file)
 		key := canonPath(file)
 		for _, entry := range fileSymbols[key] {
@@ -203,6 +217,7 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
+				logger.Debug("references failed", "file", file, "symbol", entry.sym.Name, "err", err)
 				continue
 			}
 			for _, ref := range refs {
@@ -221,7 +236,14 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 				}
 			}
 		}
+		if (i+1)%progressInterval == 0 {
+			logger.Debug("references progress", "processed", i+1, "total", len(files))
+		}
 	}
+	logger.Info("references resolved",
+		"edges", len(gb.edges)-edgesBefore,
+		"elapsed", time.Since(pass2Start),
+	)
 	return nil
 }
 

@@ -211,8 +211,10 @@ func (c *conn) waitForIdle(ctx context.Context) {
 	c.logger.Debug("waiting for language server indexing to begin")
 
 	// Phase 1: block until first $/progress begin (or timeout/cancel).
+	var indexStart time.Time
 	select {
 	case <-c.progBeganCh:
+		indexStart = time.Now()
 		c.logger.Info("indexing started")
 	case <-time.After(maxStartupWait):
 		c.logger.Debug("no indexing activity detected, assuming server is ready")
@@ -227,7 +229,7 @@ func (c *conn) waitForIdle(ctx context.Context) {
 		idle := c.progFlight <= 0
 		c.progMu.Unlock()
 		if idle {
-			c.logger.Info("indexing complete")
+			c.logger.Info("indexing complete", "elapsed", time.Since(indexStart))
 			return
 		}
 		select {
