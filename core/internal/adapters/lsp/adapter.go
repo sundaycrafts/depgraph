@@ -91,6 +91,10 @@ func (a *Adapter) Analyze(ctx context.Context, root string) (domain.Graph, error
 			return domain.Graph{}, fmt.Errorf("analyze %s: %w", lang, err)
 		}
 	}
+	// Drop symbols that no other file references. They're either truly unused
+	// or only used internally to their defining file — neither contributes to
+	// the cross-file dependency picture, so keeping them just noises up the UI.
+	gb.pruneSymbolsWithoutCrossFileRefs()
 	return gb.build(), nil
 }
 
@@ -272,12 +276,16 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 			}
 			for _, ref := range refs {
 				refFile := canonPath(uriToPath(ref.URI))
+				// Cross-file references only: same-file uses (a helper called
+				// from elsewhere in its own module, .displayName self-assignment,
+				// recursion, etc.) describe a file's internal structure rather
+				// than a dependency between files, and the dependency-graph view
+				// treats them as noise.
+				if refFile == key {
+					continue
+				}
 				callerID := findContainingSymbol(fileSymbols[refFile], ref.Range.Start)
 				if callerID != "" {
-					if callerID == entry.id {
-						// Self-reference (e.g., recursion): skip self-loops.
-						continue
-					}
 					gb.addEdge(callerID, entry.id, domain.EdgeKindReferences, domain.ConfidenceProbable)
 				} else {
 					// Reference sits outside any symbol (top-level): fall back to file→symbol.
@@ -434,6 +442,47 @@ func (gb *graphBuilder) addEdge(from, to string, kind domain.EdgeKind, conf doma
 
 func (gb *graphBuilder) build() domain.Graph {
 	return domain.Graph{Nodes: gb.nodes, Edges: gb.edges}
+}
+
+// pruneSymbolsWithoutCrossFileRefs removes every symbol node that has no
+// incoming references edge, along with any edge that touches such a symbol.
+// Same-file references are already filtered out at edge construction time, so
+// "no incoming references" here means "no other file refers to this symbol",
+// which is the noise we want gone. File nodes are always retained — they
+// describe project structure regardless of how their symbols are used.
+func (gb *graphBuilder) pruneSymbolsWithoutCrossFileRefs() {
+	hasInRef := make(map[string]bool, len(gb.nodes))
+	for _, e := range gb.edges {
+		if e.Kind == domain.EdgeKindReferences {
+			hasInRef[e.To] = true
+		}
+	}
+
+	keep := make(map[string]bool, len(gb.nodes))
+	for _, n := range gb.nodes {
+		if n.Kind != domain.NodeKindSymbol || hasInRef[n.ID] {
+			keep[n.ID] = true
+		}
+	}
+
+	newNodes := make([]domain.Node, 0, len(gb.nodes))
+	for _, n := range gb.nodes {
+		if keep[n.ID] {
+			newNodes = append(newNodes, n)
+		}
+	}
+	gb.nodes = newNodes
+
+	newEdges := make([]domain.Edge, 0, len(gb.edges))
+	newEdgeSet := make(map[edgeKey]bool, len(gb.edgeSet))
+	for _, e := range gb.edges {
+		if keep[e.From] && keep[e.To] {
+			newEdges = append(newEdges, e)
+			newEdgeSet[edgeKey{e.From, e.To, e.Kind}] = true
+		}
+	}
+	gb.edges = newEdges
+	gb.edgeSet = newEdgeSet
 }
 
 // parseSymbols handles both []DocumentSymbol and []SymbolInformation.
