@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,10 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// errConnClosed is returned by call when the underlying LSP process exits
+// or its stdout reaches EOF before a response arrives.
+var errConnClosed = errors.New("LSP connection closed")
 
 // message is a JSON-RPC 2.0 message (request, response, or notification).
 type message struct {
@@ -47,6 +52,8 @@ type conn struct {
 	progBeganOnce sync.Once
 	progBeganCh   chan struct{} // closed when the first $/progress begin is received
 
+	done chan struct{} // closed when readLoop exits, unblocking pending callers
+
 	logger *slog.Logger
 }
 
@@ -60,13 +67,17 @@ func newConn(r io.Reader, w io.Writer, logger *slog.Logger) *conn {
 		scanner:     scanner,
 		pending:     make(map[int64]chan message),
 		progBeganCh: make(chan struct{}),
+		done:        make(chan struct{}),
 		logger:      logger,
 	}
 	return c
 }
 
 // call sends a request and waits for the response.
-func (c *conn) call(method string, params, result any) error {
+//
+// Returns ctx.Err() if ctx is cancelled before the response arrives, and
+// errConnClosed if the underlying readLoop exits (e.g. the LSP process died).
+func (c *conn) call(ctx context.Context, method string, params, result any) error {
 	id := c.nextID.Add(1)
 
 	rawParams, err := json.Marshal(params)
@@ -79,26 +90,38 @@ func (c *conn) call(method string, params, result any) error {
 	c.pending[id] = ch
 	c.pendMu.Unlock()
 
+	cleanup := func() {
+		c.pendMu.Lock()
+		delete(c.pending, id)
+		c.pendMu.Unlock()
+	}
+
 	if err := c.send(&message{
 		JSONRPC: "2.0",
 		ID:      &id,
 		Method:  method,
 		Params:  rawParams,
 	}); err != nil {
-		c.pendMu.Lock()
-		delete(c.pending, id)
-		c.pendMu.Unlock()
+		cleanup()
 		return err
 	}
 
-	resp := <-ch
-	if resp.Error != nil {
-		return resp.Error
+	select {
+	case resp := <-ch:
+		if resp.Error != nil {
+			return resp.Error
+		}
+		if result != nil && resp.Result != nil {
+			return json.Unmarshal(resp.Result, result)
+		}
+		return nil
+	case <-ctx.Done():
+		cleanup()
+		return ctx.Err()
+	case <-c.done:
+		cleanup()
+		return errConnClosed
 	}
-	if result != nil && resp.Result != nil {
-		return json.Unmarshal(resp.Result, result)
-	}
-	return nil
 }
 
 // notify sends a notification (no response expected).
@@ -126,8 +149,11 @@ func (c *conn) send(msg *message) error {
 }
 
 // readLoop reads incoming messages and dispatches responses to pending callers.
-// It returns when the reader is exhausted or returns an error.
+// It returns when the reader is exhausted or returns an error. On exit, c.done
+// is closed so any in-flight call() invocations unblock with errConnClosed
+// instead of deadlocking.
 func (c *conn) readLoop() error {
+	defer close(c.done)
 	for c.scanner.Scan() {
 		var msg message
 		if err := json.Unmarshal(c.scanner.Bytes(), &msg); err != nil {

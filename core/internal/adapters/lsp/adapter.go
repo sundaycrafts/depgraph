@@ -115,7 +115,7 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 
 	rootURI := fileURI(root)
 	var initResult InitializeResult
-	if err := c.call("initialize", InitializeParams{
+	if err := c.call(ctx, "initialize", InitializeParams{
 		ProcessID: os.Getpid(),
 		RootURI:   rootURI,
 		Capabilities: ClientCapability{
@@ -166,9 +166,12 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		}
 
 		var raw symbolResult
-		if err := c.call("textDocument/documentSymbol", DocumentSymbolParams{
+		if err := c.call(ctx, "textDocument/documentSymbol", DocumentSymbolParams{
 			TextDocument: TextDocumentIdentifier{URI: docURI},
 		}, &raw); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			continue
 		}
 		syms, err := parseSymbols(raw)
@@ -195,8 +198,11 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		docURI := fileURI(file)
 		key := canonPath(file)
 		for _, entry := range fileSymbols[key] {
-			refs, err := getReferences(c, docURI, entry.sym.SelectionRange.Start)
+			refs, err := getReferences(ctx, c, docURI, entry.sym.SelectionRange.Start)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				continue
 			}
 			for _, ref := range refs {
@@ -396,9 +402,9 @@ func flattenSymbols(syms []DocumentSymbol) []DocumentSymbol {
 	return result
 }
 
-func getReferences(c *conn, docURI URI, pos Position) ([]Location, error) {
+func getReferences(ctx context.Context, c *conn, docURI URI, pos Position) ([]Location, error) {
 	var locs []Location
-	err := c.call("textDocument/references", ReferenceParams{
+	err := c.call(ctx, "textDocument/references", ReferenceParams{
 		TextDocument: TextDocumentIdentifier{URI: docURI},
 		Position:     pos,
 		Context:      ReferenceContext{IncludeDeclaration: false},

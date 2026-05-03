@@ -2,13 +2,16 @@ package lsp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // writerFunc is an io.Writer backed by a function, used to intercept writes in tests.
@@ -77,7 +80,7 @@ func TestConn_CallAndResponse(t *testing.T) {
 	}()
 
 	var result map[string]string
-	if err := c.call("test/method", map[string]any{"x": 1}, &result); err != nil {
+	if err := c.call(context.Background(), "test/method", map[string]any{"x": 1}, &result); err != nil {
 		t.Fatalf("call failed: %v", err)
 	}
 	if result["hello"] != "world" {
@@ -107,12 +110,48 @@ func TestConn_CallRPCError(t *testing.T) {
 		pw.Close()
 	}()
 
-	err := c.call("unknown/method", nil, nil)
+	err := c.call(context.Background(), "unknown/method", nil, nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
 	if !strings.Contains(err.Error(), "method not found") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestConn_CallContextCancelled verifies that call() returns ctx.Err() when
+// the context is cancelled before the LSP server responds.
+func TestConn_CallContextCancelled(t *testing.T) {
+	c, _, _ := pipeConn(io.Discard)
+	go c.readLoop() //nolint:errcheck
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	err := c.call(ctx, "test/method", nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got: %v", err)
+	}
+}
+
+// TestConn_CallConnectionClosed verifies that call() returns errConnClosed
+// when readLoop exits (e.g. the LSP process died) before a response arrives.
+func TestConn_CallConnectionClosed(t *testing.T) {
+	c, pw, sent := pipeConn(io.Discard)
+	go c.readLoop() //nolint:errcheck
+
+	// Close the read side after the request is sent so readLoop sees EOF.
+	go func() {
+		<-sent
+		pw.Close()
+	}()
+
+	err := c.call(context.Background(), "test/method", nil, nil)
+	if !errors.Is(err, errConnClosed) {
+		t.Errorf("expected errConnClosed, got: %v", err)
 	}
 }
 
