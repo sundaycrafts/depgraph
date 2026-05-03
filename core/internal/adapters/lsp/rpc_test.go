@@ -177,11 +177,39 @@ func TestParseSymbols_DocumentSymbol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result) != 2 {
-		t.Errorf("expected 2 flattened symbols, got %d", len(result))
+	// Top-level only — `Bar` is a child of `Foo` and must not appear as a
+	// sibling. Foo's Children slice should still carry Bar so other code
+	// paths can walk it if needed.
+	if len(result) != 1 {
+		t.Fatalf("expected 1 top-level symbol, got %d", len(result))
 	}
-	if result[0].Name != "Foo" || result[1].Name != "Bar" {
-		t.Errorf("unexpected names: %v, %v", result[0].Name, result[1].Name)
+	if result[0].Name != "Foo" {
+		t.Errorf("expected Foo, got %q", result[0].Name)
+	}
+	if len(result[0].Children) != 1 || result[0].Children[0].Name != "Bar" {
+		t.Errorf("expected Bar preserved as Foo's child, got %+v", result[0].Children)
+	}
+}
+
+func TestParseSymbols_FlatSymbolInformationDropped(t *testing.T) {
+	// Server ignored hierarchicalDocumentSymbolSupport and returned
+	// SymbolInformation[]. Without parent info we cannot tell which entries
+	// are top-level, so parseSymbols returns nothing rather than re-emit
+	// nested-scope noise.
+	si := []SymbolInformation{
+		{
+			Name:     "Foo",
+			Kind:     SymbolKindFunction,
+			Location: Location{URI: "file:///x.ts", Range: Range{Start: Position{0, 0}, End: Position{5, 0}}},
+		},
+	}
+	raw, _ := json.Marshal(si)
+	result, err := parseSymbols(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("expected empty (flat form dropped), got %d entries", len(result))
 	}
 }
 

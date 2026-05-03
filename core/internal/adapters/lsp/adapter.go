@@ -485,8 +485,25 @@ func (gb *graphBuilder) pruneSymbolsWithoutCrossFileRefs() {
 	gb.edgeSet = newEdgeSet
 }
 
-// parseSymbols handles both []DocumentSymbol and []SymbolInformation.
-// It flattens hierarchical symbols into a flat list.
+// parseSymbols returns only the file's top-level symbols (the direct
+// children of the file in the LSP DocumentSymbol response).
+//
+// Why top-level only:
+//   - Members of containers (class methods, namespace declarations) are
+//     useful for some richer analyses, but our cross-file dependency view
+//     is keyed off file boundaries.
+//   - Children of leaf-kind symbols (a function body's destructured locals
+//     like `const { user } = useUser()`) are pure noise — they aren't
+//     accessible from other files yet would otherwise emit a node and
+//     trigger their own references query.
+//
+// The hierarchical DocumentSymbol[] form is what we expect, since we
+// declare hierarchicalDocumentSymbolSupport=true in initialize. Servers
+// that ignore that flag return the flat SymbolInformation[] form, which
+// has no parent hierarchy we can use to identify file-top-level entries;
+// rather than emitting every entry (and re-introducing nested-scope
+// noise) we skip them. None of the supported language servers (gopls,
+// rust-analyzer, typescript-language-server) takes this path in practice.
 func parseSymbols(raw json.RawMessage) ([]DocumentSymbol, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
@@ -494,34 +511,10 @@ func parseSymbols(raw json.RawMessage) ([]DocumentSymbol, error) {
 
 	var docSyms []DocumentSymbol
 	if err := json.Unmarshal(raw, &docSyms); err == nil && len(docSyms) > 0 && docSyms[0].SelectionRange != (Range{}) {
-		return flattenSymbols(docSyms), nil
+		return docSyms, nil
 	}
 
-	var symInfos []SymbolInformation
-	if err := json.Unmarshal(raw, &symInfos); err != nil {
-		return nil, fmt.Errorf("parse symbols: %w", err)
-	}
-	result := make([]DocumentSymbol, len(symInfos))
-	for i, si := range symInfos {
-		result[i] = DocumentSymbol{
-			Name:           si.Name,
-			Kind:           si.Kind,
-			Range:          si.Location.Range,
-			SelectionRange: si.Location.Range,
-		}
-	}
-	return result, nil
-}
-
-func flattenSymbols(syms []DocumentSymbol) []DocumentSymbol {
-	var result []DocumentSymbol
-	for _, s := range syms {
-		result = append(result, s)
-		if len(s.Children) > 0 {
-			result = append(result, flattenSymbols(s.Children)...)
-		}
-	}
-	return result
+	return nil, nil
 }
 
 func getReferences(ctx context.Context, c *conn, docURI URI, pos Position) ([]Location, error) {
