@@ -138,3 +138,8 @@ type TextDocumentItem struct {
 type DidOpenTextDocumentParams struct {
 	TextDocument TextDocumentItem `json:"textDocument"`
 }
+
+// DidCloseTextDocumentParams is the params for "textDocument/didClose".
+type DidCloseTextDocumentParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+}

@@ -164,6 +164,7 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 
 		// Some language servers (e.g. typescript-language-server) require the
 		// document to be opened before documentSymbol requests will return results.
+		didOpened := false
 		if text, err := os.ReadFile(file); err == nil {
 			_ = c.notify("textDocument/didOpen", DidOpenTextDocumentParams{
 				TextDocument: TextDocumentItem{
@@ -173,16 +174,28 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 					Text:       string(text),
 				},
 			})
+			didOpened = true
 		}
 
 		var raw symbolResult
-		if err := c.call(ctx, "textDocument/documentSymbol", DocumentSymbolParams{
+		callErr := c.call(ctx, "textDocument/documentSymbol", DocumentSymbolParams{
 			TextDocument: TextDocumentIdentifier{URI: docURI},
-		}, &raw); err != nil {
+		}, &raw)
+
+		// Always close if we opened — even on error. Without this, tsserver's
+		// open-document working set grows linearly across the loop, making each
+		// documentSymbol query O(N) and the whole pass O(N²).
+		if didOpened {
+			_ = c.notify("textDocument/didClose", DidCloseTextDocumentParams{
+				TextDocument: TextDocumentIdentifier{URI: docURI},
+			})
+		}
+
+		if callErr != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			logger.Debug("documentSymbol failed", "file", file, "err", err)
+			logger.Debug("documentSymbol failed", "file", file, "err", callErr)
 			continue
 		}
 		syms, err := parseSymbols(raw)
@@ -215,6 +228,36 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 	logger.Info("resolving references")
 	pass2Start := time.Now()
 	edgesBefore := len(gb.edges)
+	// typescript-language-server only considers files in its current open set
+	// when resolving cross-file references. Pre-open every file before the
+	// query loop, then close them all at the end. This is bounded — the open
+	// set is the project size, not multiplied per query like Pass 1's
+	// documentSymbol issue.
+	openedURIs := make([]URI, 0, len(files))
+	for _, file := range files {
+		text, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+		docURI := fileURI(file)
+		_ = c.notify("textDocument/didOpen", DidOpenTextDocumentParams{
+			TextDocument: TextDocumentItem{
+				URI:        docURI,
+				LanguageID: langIDForFile(lang, file),
+				Version:    1,
+				Text:       string(text),
+			},
+		})
+		openedURIs = append(openedURIs, docURI)
+	}
+	defer func() {
+		for _, uri := range openedURIs {
+			_ = c.notify("textDocument/didClose", DidCloseTextDocumentParams{
+				TextDocument: TextDocumentIdentifier{URI: uri},
+			})
+		}
+	}()
+
 	for i, file := range files {
 		docURI := fileURI(file)
 		key := canonPath(file)
