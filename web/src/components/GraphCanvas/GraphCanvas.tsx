@@ -18,6 +18,7 @@ interface Props {
     graph: Graph;
     onNodeSelect: (node: DomainNode) => void;
     selectedKinds: string[];
+    limitToHundred?: boolean;
 }
 
 type GraphNodeData = {
@@ -33,9 +34,17 @@ const SYMBOL_BASE_HSL = { h: 53, s: 96, l: 88 } as const; // #fef9c3
 const SYMBOL_HOT_HSL = { h: 0, s: 85, l: 82 } as const; // max-references red
 const HIGHLIGHT_BG = "#93c5fd"; // blue-300 — more vivid than file-node blue (#dbeafe)
 const COLS = 6;
-const COL_WIDTH = 160;
-const ROW_HEIGHT = 36;
-const FILE_SYMBOL_GAP = 10;
+// Layout grid: NODE_W/NODE_H are the assumed node body sizes; GAP is the
+// inter-node whitespace, fixed at 5% of NODE_H so clusters render densely
+// instead of sparsely. COL_WIDTH / ROW_HEIGHT / FILE_SYMBOL_GAP all derive
+// from the same GAP so the spacing stays consistent everywhere.
+const NODE_W = 150;
+const NODE_H = 30;
+const GAP = Math.max(2, Math.round(NODE_H * 0.05));
+const COL_WIDTH = NODE_W + GAP;
+const ROW_HEIGHT = NODE_H + GAP;
+const FILE_SYMBOL_GAP = GAP;
+const NODE_LIMIT = 100;
 
 // symbolBg interpolates the symbol node background from yellow toward red as
 // the incoming reference count grows. Hue is the dominant change; saturation
@@ -51,12 +60,17 @@ function symbolBg(refCount: number, maxRefCount: number): string {
     return `hsl(${h.toFixed(1)}, ${s.toFixed(1)}%, ${l.toFixed(1)}%)`;
 }
 
-function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
+function GraphCanvasInner({
+    graph,
+    onNodeSelect,
+    selectedKinds,
+    limitToHundred = false,
+}: Props) {
     const { fitView } = useReactFlow<GraphRFNode, GraphRFEdge>();
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
     const visibleDomainNodes = useMemo(() => {
-        return graph.nodes.filter((n) => {
+        const filtered = graph.nodes.filter((n) => {
             if (n.kind === "file") {
                 return selectedKinds.includes("file");
             }
@@ -65,7 +79,8 @@ function GraphCanvasInner({ graph, onNodeSelect, selectedKinds }: Props) {
                 (n.symbolKind != null && selectedKinds.includes(n.symbolKind))
             );
         });
-    }, [graph.nodes, selectedKinds]);
+        return limitToHundred ? filtered.slice(0, NODE_LIMIT) : filtered;
+    }, [graph.nodes, selectedKinds, limitToHundred]);
 
     const visibleDomainEdges = useMemo(() => {
         const visibleIds = new Set(visibleDomainNodes.map((n) => n.id));
