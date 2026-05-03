@@ -24,6 +24,7 @@ interface Props {
     selectedKinds: string[];
     limitNodes?: boolean;
     searchQuery?: string;
+    showEdges?: boolean;
 }
 
 export type GraphRFNode = FolderGroupNodeType | EntityNodeType;
@@ -33,7 +34,8 @@ const SYMBOL_BASE_HSL = { h: 53, s: 96, l: 88 } as const; // #fef9c3
 const SYMBOL_HOT_HSL = { h: 0, s: 85, l: 82 } as const; // max-references red
 const HIGHLIGHT_BG = "#93c5fd"; // blue-300 — selection
 const SEARCH_MATCH_BG = "#bae6fd"; // sky-200 — search match (lighter, distinct from selection)
-const COLS = 8;
+const FOLDER_MIN_COLS = 3;
+const FOLDER_MAX_COLS = 6;
 const INITIAL_ZOOM = 0.5;
 const MIN_ZOOM = 0.2;
 const NODE_W = 150;
@@ -47,17 +49,19 @@ const FOLDER_PADDING = 6;
 const FOLDER_GAP = GAP * 2;
 // Soft cap on a row's total folder width before wrapping. Sized so the
 // canvas can pack a handful of typical-width folders side by side.
-const ROW_WIDTH_BUDGET = COLS * 4 * COL_WIDTH;
+const ROW_WIDTH_BUDGET = FOLDER_MAX_COLS * 4 * COL_WIDTH;
 
 // symbolBg picks a symbol node background based on its incoming reference
-// count: zero → white (no dependants), one → base (yellow), interpolating
-// toward hot (red) as the count climbs to maxRefCount.
-function symbolBg(refCount: number, maxRefCount: number): string {
+// count. Zero → white (no dependants). Otherwise the gradient runs from
+// base (yellow) at `lo` to hot (red) at `hi`, with values outside [lo, hi]
+// clamped to the endpoints — so a single huge outlier doesn't compress the
+// whole gradient into the dim end.
+function symbolBg(refCount: number, lo: number, hi: number): string {
     if (refCount === 0) {
         return "#ffffff";
     }
-    const denom = Math.max(maxRefCount - 1, 1);
-    const t = Math.min((refCount - 1) / denom, 1);
+    const denom = hi - lo;
+    const t = denom <= 0 ? 0 : Math.min(Math.max((refCount - lo) / denom, 0), 1);
     const h = SYMBOL_BASE_HSL.h + (SYMBOL_HOT_HSL.h - SYMBOL_BASE_HSL.h) * t;
     const s = SYMBOL_BASE_HSL.s + (SYMBOL_HOT_HSL.s - SYMBOL_BASE_HSL.s) * t;
     const l = SYMBOL_BASE_HSL.l + (SYMBOL_HOT_HSL.l - SYMBOL_BASE_HSL.l) * t;
@@ -131,6 +135,7 @@ function GraphCanvasInner({
     selectedKinds,
     limitNodes = false,
     searchQuery = "",
+    showEdges = false,
 }: Props) {
     const { fitView, getInternalNode } = useReactFlow<
         GraphRFNode,
@@ -291,13 +296,26 @@ function GraphCanvasInner({
             }))
             .sort((a, b) => a.folder.localeCompare(b.folder));
 
-        // Global maxRefCount drives the symbol color gradient — kept across
-        // folders so a hot node looks the same regardless of its neighborhood.
-        let maxRefCount = 0;
-        for (const n of symbols) {
-            const c = refCountByNodeId.get(n.id) ?? 0;
-            if (c > maxRefCount) maxRefCount = c;
-        }
+        // Color gradient endpoints from the IQR (Q1–Q3) of refCount so a
+        // single huge outlier doesn't compress everything else into the dim
+        // end. Computed across all visible symbols so a hot node looks the
+        // same regardless of its folder neighborhood. Zero refCount nodes
+        // are excluded — they always render white.
+        const positiveRefs = symbols
+            .map((n) => refCountByNodeId.get(n.id) ?? 0)
+            .filter((c) => c > 0)
+            .sort((a, b) => a - b);
+        const q = (frac: number) =>
+            positiveRefs.length === 0
+                ? 0
+                : positiveRefs[
+                      Math.min(
+                          positiveRefs.length - 1,
+                          Math.floor(positiveRefs.length * frac),
+                      )
+                  ];
+        const refLo = q(0.25);
+        const refHi = q(0.75);
 
         // Shelf-pack folder boxes left→right, wrapping when the row budget
         // is full. Row height = max folder height in that row.
@@ -314,7 +332,10 @@ function GraphCanvasInner({
         let cursorY = 0;
         let rowMaxH = 0;
         for (const { folder, members } of orderedFolders) {
-            const cols = Math.min(COLS, members.length);
+            const cols = Math.min(
+                FOLDER_MAX_COLS,
+                Math.max(FOLDER_MIN_COLS, members.length),
+            );
             const rows = Math.ceil(members.length / cols);
             const width = cols * COL_WIDTH + 2 * FOLDER_PADDING;
             const height =
@@ -366,7 +387,7 @@ function GraphCanvasInner({
                     ? HIGHLIGHT_BG
                     : isSearchMatch
                       ? SEARCH_MATCH_BG
-                      : symbolBg(refCount, maxRefCount);
+                      : symbolBg(refCount, refLo, refHi);
                 const filename = basename(n.path ?? "");
                 result.push({
                     id: n.id,
@@ -399,14 +420,15 @@ function GraphCanvasInner({
     ]);
 
     const flowEdges = useMemo<GraphRFEdge[]>(() => {
+        if (!showEdges) return [];
         return visibleDomainEdges.map((e) => {
             const highlighted =
                 highlightedIds.has(e.from) && highlightedIds.has(e.to);
             const color = highlighted
-                ? "#2563eb"
+                ? "#2563eb" // blue-600
                 : e.kind === "defines"
-                  ? "#a5b4fc"
-                  : "#cbd5e1";
+                  ? "#e2e8f0" // slate-200
+                  : "#f8fafc"; // slate-50 — lightest available
             return {
                 id: e.id,
                 source: e.from,
@@ -414,6 +436,10 @@ function GraphCanvasInner({
                 selectable: false,
                 focusable: false,
                 interactionWidth: 0,
+                // Push edges below child nodes (which auto-elevate due to
+                // parent grouping) so the line passes behind folder borders
+                // and labels.
+                zIndex: -1,
                 style: { stroke: color },
                 markerEnd: {
                     type: MarkerType.ArrowClosed,
@@ -423,7 +449,7 @@ function GraphCanvasInner({
                 },
             };
         });
-    }, [visibleDomainEdges, highlightedIds]);
+    }, [visibleDomainEdges, highlightedIds, showEdges]);
 
     const [nodes, setNodes, onNodesChange] =
         useNodesState<GraphRFNode>(flowNodes);

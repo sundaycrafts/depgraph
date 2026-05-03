@@ -13,6 +13,7 @@ export default function App() {
   const [limitNodes, setLimitNodes] = useState<boolean>(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
+  const [showEdges, setShowEdges] = useState<boolean>(false)
 
   useEffect(() => {
     const id = setTimeout(() => setDebouncedQuery(searchQuery), 500)
@@ -72,6 +73,14 @@ export default function App() {
             />
             Limit to {NODE_LIMIT.toLocaleString()} nodes
           </label>
+          <label className="flex items-center gap-1 text-xs text-gray-700 shrink-0">
+            <input
+              type="checkbox"
+              checked={showEdges}
+              onChange={(e) => setShowEdges(e.target.checked)}
+            />
+            Show edges
+          </label>
           <span className="ml-auto text-xs text-gray-600 shrink-0 tabular-nums">
             Showing {visibleSymbols.toLocaleString()} / {totalSymbols.toLocaleString()} symbols
           </span>
@@ -83,6 +92,7 @@ export default function App() {
             selectedKinds={selectedKinds}
             limitNodes={limitNodes}
             searchQuery={debouncedQuery}
+            showEdges={showEdges}
           />
         </div>
       </div>

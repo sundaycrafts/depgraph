@@ -1,5 +1,10 @@
-import type { Node, NodeProps } from "@xyflow/react";
+import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import type { Node as DomainNode } from "../../schemas/api";
+
+// React Flow attaches edges to <Handle> components. We don't expose an
+// interactive connection UX, so the handles are visually hidden but still
+// give edges an anchor point on the node body.
+const hiddenHandle = { opacity: 0, pointerEvents: "none" as const };
 
 export type EntityNodeData = {
     label: string;
@@ -51,6 +56,16 @@ export function EntityNode({ data }: NodeProps<EntityNodeType>) {
             >
                 {data.label}
             </div>
+            <Handle
+                type="target"
+                position={Position.Top}
+                style={hiddenHandle}
+            />
+            <Handle
+                type="source"
+                position={Position.Bottom}
+                style={hiddenHandle}
+            />
         </div>
     );
 }
