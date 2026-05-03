@@ -91,8 +91,9 @@ func (a *Adapter) Analyze(ctx context.Context, root string) (domain.Graph, error
 			return domain.Graph{}, fmt.Errorf("analyze %s: %w", lang, err)
 		}
 	}
-	// Drop symbols with no cross-file references — noise for this view.
-	gb.pruneSymbolsWithoutCrossFileRefs()
+	// Drop dead-code symbols — those with neither incoming nor outgoing
+	// cross-file references. They're disconnected from the dependency view.
+	gb.pruneIsolatedSymbols()
 	return gb.build(), nil
 }
 
@@ -438,21 +439,25 @@ func (gb *graphBuilder) build() domain.Graph {
 	return domain.Graph{Nodes: gb.nodes, Edges: gb.edges}
 }
 
-// pruneSymbolsWithoutCrossFileRefs drops symbols nothing else references
-// and any edges touching them. Same-file refs are already filtered upstream,
-// so "no incoming refs" means "isolated to its file" — pure noise. File
-// nodes always stay.
-func (gb *graphBuilder) pruneSymbolsWithoutCrossFileRefs() {
+// pruneIsolatedSymbols drops symbols disconnected from the cross-file
+// dependency graph — those with neither incoming nor outgoing references.
+// Same-file refs are already filtered upstream, so "no edges either way"
+// means "dead code" for cross-file purposes. A symbol that uses other
+// symbols but is never used itself is still kept (it's an entry point or
+// a forgotten caller, useful information). File nodes always stay.
+func (gb *graphBuilder) pruneIsolatedSymbols() {
 	hasInRef := make(map[string]bool, len(gb.nodes))
+	hasOutRef := make(map[string]bool, len(gb.nodes))
 	for _, e := range gb.edges {
 		if e.Kind == domain.EdgeKindReferences {
 			hasInRef[e.To] = true
+			hasOutRef[e.From] = true
 		}
 	}
 
 	keep := make(map[string]bool, len(gb.nodes))
 	for _, n := range gb.nodes {
-		if n.Kind != domain.NodeKindSymbol || hasInRef[n.ID] {
+		if n.Kind != domain.NodeKindSymbol || hasInRef[n.ID] || hasOutRef[n.ID] {
 			keep[n.ID] = true
 		}
 	}
