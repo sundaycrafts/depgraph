@@ -91,9 +91,7 @@ func (a *Adapter) Analyze(ctx context.Context, root string) (domain.Graph, error
 			return domain.Graph{}, fmt.Errorf("analyze %s: %w", lang, err)
 		}
 	}
-	// Drop symbols that no other file references. They're either truly unused
-	// or only used internally to their defining file — neither contributes to
-	// the cross-file dependency picture, so keeping them just noises up the UI.
+	// Drop symbols with no cross-file references — noise for this view.
 	gb.pruneSymbolsWithoutCrossFileRefs()
 	return gb.build(), nil
 }
@@ -276,11 +274,7 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 			}
 			for _, ref := range refs {
 				refFile := canonPath(uriToPath(ref.URI))
-				// Cross-file references only: same-file uses (a helper called
-				// from elsewhere in its own module, .displayName self-assignment,
-				// recursion, etc.) describe a file's internal structure rather
-				// than a dependency between files, and the dependency-graph view
-				// treats them as noise.
+				// Cross-file references only — same-file uses are noise.
 				if refFile == key {
 					continue
 				}
@@ -444,12 +438,10 @@ func (gb *graphBuilder) build() domain.Graph {
 	return domain.Graph{Nodes: gb.nodes, Edges: gb.edges}
 }
 
-// pruneSymbolsWithoutCrossFileRefs removes every symbol node that has no
-// incoming references edge, along with any edge that touches such a symbol.
-// Same-file references are already filtered out at edge construction time, so
-// "no incoming references" here means "no other file refers to this symbol",
-// which is the noise we want gone. File nodes are always retained — they
-// describe project structure regardless of how their symbols are used.
+// pruneSymbolsWithoutCrossFileRefs drops symbols nothing else references
+// and any edges touching them. Same-file refs are already filtered upstream,
+// so "no incoming refs" means "isolated to its file" — pure noise. File
+// nodes always stay.
 func (gb *graphBuilder) pruneSymbolsWithoutCrossFileRefs() {
 	hasInRef := make(map[string]bool, len(gb.nodes))
 	for _, e := range gb.edges {
@@ -485,25 +477,14 @@ func (gb *graphBuilder) pruneSymbolsWithoutCrossFileRefs() {
 	gb.edgeSet = newEdgeSet
 }
 
-// parseSymbols returns only the file's top-level symbols (the direct
-// children of the file in the LSP DocumentSymbol response).
+// parseSymbols returns the file's top-level symbols only. Anything
+// reachable across files in our supported languages appears as a direct
+// child of the file in the DocumentSymbol response; nested entries are
+// local scope and noise for the cross-file dependency view.
 //
-// Why top-level only:
-//   - Members of containers (class methods, namespace declarations) are
-//     useful for some richer analyses, but our cross-file dependency view
-//     is keyed off file boundaries.
-//   - Children of leaf-kind symbols (a function body's destructured locals
-//     like `const { user } = useUser()`) are pure noise — they aren't
-//     accessible from other files yet would otherwise emit a node and
-//     trigger their own references query.
-//
-// The hierarchical DocumentSymbol[] form is what we expect, since we
-// declare hierarchicalDocumentSymbolSupport=true in initialize. Servers
-// that ignore that flag return the flat SymbolInformation[] form, which
-// has no parent hierarchy we can use to identify file-top-level entries;
-// rather than emitting every entry (and re-introducing nested-scope
-// noise) we skip them. None of the supported language servers (gopls,
-// rust-analyzer, typescript-language-server) takes this path in practice.
+// We rely on hierarchicalDocumentSymbolSupport=true (set at initialize).
+// The flat SymbolInformation[] fallback has no hierarchy to filter on,
+// so we drop it.
 func parseSymbols(raw json.RawMessage) ([]DocumentSymbol, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
