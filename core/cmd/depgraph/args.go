@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/sundaycrafts/depgraph/internal/version"
 )
 
 // stringSlice collects repeatable flag values.
@@ -22,6 +24,13 @@ type cliArgs struct {
 }
 
 func parseArgs() cliArgs {
+	// `depgraph version` prints the build version and exits before any flag
+	// parsing, so it works without arguments and isn't shadowed by `--version`.
+	if len(os.Args) >= 2 && os.Args[1] == "version" {
+		fmt.Println(version.Version)
+		os.Exit(0)
+	}
+
 	var excludes stringSlice
 	var mcpMode bool
 	var verbose bool
@@ -32,6 +41,7 @@ func parseArgs() cliArgs {
 	flag.BoolVar(&noCache, "no-cache", false, "bypass the on-disk graph cache and re-run analysis")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: depgraph <target-dir> [--exclude=<glob>]... [--mcp] [--verbose] [--no-cache]")
+		fmt.Fprintln(os.Stderr, "       depgraph version")
 		flag.PrintDefaults()
 	}
 

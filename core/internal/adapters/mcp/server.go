@@ -13,6 +13,7 @@ import (
 
 	"github.com/sundaycrafts/depgraph/internal/domain"
 	"github.com/sundaycrafts/depgraph/internal/ports"
+	"github.com/sundaycrafts/depgraph/internal/version"
 )
 
 const mcpProtocolVersion = "2024-11-05"
@@ -127,7 +128,7 @@ func (a *Adapter) dispatch(ctx context.Context, msg rpcMsg) (any, *rpcErr) {
 		return map[string]any{
 			"protocolVersion": mcpProtocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "depgraph", "version": "0.1.0"},
+			"serverInfo":      map[string]any{"name": "depgraph", "version": version.Version},
 		}, nil
 
 	case "tools/list":

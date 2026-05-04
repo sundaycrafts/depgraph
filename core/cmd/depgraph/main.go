@@ -17,9 +17,8 @@ import (
 	mcpadapter "github.com/sundaycrafts/depgraph/internal/adapters/mcp"
 	"github.com/sundaycrafts/depgraph/internal/cache"
 	"github.com/sundaycrafts/depgraph/internal/ports"
+	"github.com/sundaycrafts/depgraph/internal/version"
 )
-
-var version = "dev"
 
 func main() {
 	parsed := parseArgs()
@@ -30,6 +29,7 @@ func main() {
 		level = slog.LevelDebug
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+	slog.Info("depgraph starting", "version", version.Version, "mode", modeName(parsed.mcp))
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -39,7 +39,7 @@ func main() {
 		lspadapter.WithLogger(slog.Default()),
 	)
 	cacheOpts := []cache.Option{
-		cache.WithVersion(version),
+		cache.WithVersion(version.Version),
 		cache.WithExcludes(parsed.excludes),
 		cache.WithLogger(slog.Default()),
 	}
@@ -71,7 +71,7 @@ func main() {
 
 		server = httpadapter.New(graph, editor,
 			httpadapter.WithOnReady(func(addr string) {
-				fmt.Printf("depgraph %s — serving %s\n", version, addr)
+				fmt.Printf("depgraph %s — serving %s\n", version.Version, addr)
 				go func() {
 					time.Sleep(300 * time.Millisecond)
 					openBrowser(addr)
@@ -84,6 +84,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func modeName(mcp bool) string {
+	if mcp {
+		return "mcp"
+	}
+	return "http"
 }
 
 func openBrowser(url string) {
