@@ -279,13 +279,12 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 					continue
 				}
 				callerID := findContainingSymbol(fileSymbols[refFile], ref.Range.Start)
-				if callerID != "" {
-					gb.addEdge(callerID, entry.id, domain.EdgeKindReferences, domain.ConfidenceProbable)
-				} else {
-					// Reference sits outside any symbol (top-level): fall back to file→symbol.
-					refFileID := gb.addFileNode(refFile)
-					gb.addEdge(refFileID, entry.id, domain.EdgeKindReferences, domain.ConfidenceProbable)
+				if callerID == "" {
+					// Reference sits outside any symbol (e.g. module top-level
+					// statements); we can't attribute a meaningful caller, skip.
+					continue
 				}
+				gb.addEdge(callerID, entry.id, domain.EdgeKindReferences, domain.ConfidenceProbable)
 			}
 		}
 		if (i+1)%progressInterval == 0 {
