@@ -438,21 +438,25 @@ func (gb *graphBuilder) build() domain.Graph {
 	return domain.Graph{Nodes: gb.nodes, Edges: gb.edges}
 }
 
-// pruneSymbolsWithoutCrossFileRefs drops symbols nothing else references
-// and any edges touching them. Same-file refs are already filtered upstream,
-// so "no incoming refs" means "isolated to its file" — pure noise. File
-// nodes always stay.
+// pruneSymbolsWithoutCrossFileRefs drops symbols isolated to their own file
+// — symbols with neither incoming nor outgoing cross-file reference edges.
+// Same-file refs are already filtered upstream, so a symbol with no
+// `references` edges (in either direction) is pure noise. Symbols with only
+// outgoing refs (entry points like main) or only incoming refs (leaf types)
+// are kept. File nodes always stay. Only `references` edges are counted —
+// `defines` edges would otherwise mark every symbol as connected.
 func (gb *graphBuilder) pruneSymbolsWithoutCrossFileRefs() {
-	hasInRef := make(map[string]bool, len(gb.nodes))
+	hasRef := make(map[string]bool, len(gb.nodes))
 	for _, e := range gb.edges {
 		if e.Kind == domain.EdgeKindReferences {
-			hasInRef[e.To] = true
+			hasRef[e.From] = true
+			hasRef[e.To] = true
 		}
 	}
 
 	keep := make(map[string]bool, len(gb.nodes))
 	for _, n := range gb.nodes {
-		if n.Kind != domain.NodeKindSymbol || hasInRef[n.ID] {
+		if n.Kind != domain.NodeKindSymbol || hasRef[n.ID] {
 			keep[n.ID] = true
 		}
 	}
