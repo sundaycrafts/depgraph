@@ -39,20 +39,37 @@ type rpcErr struct {
 
 // Adapter implements ports.ServerPort and serves MCP over stdio.
 type Adapter struct {
+	analyzer      ports.AnalyzerPort
+	editorFactory func(string) ports.EditorPort
+
 	graph    domain.Graph
 	editor   ports.EditorPort
 	nodeByID map[string]domain.Node
 	refsByTo map[string][]string // edge.To → []edge.From for "references" edges
-	in       io.Reader
-	out      io.Writer
-	mu       sync.Mutex // serialises writes to out
+
+	in  io.Reader
+	out io.Writer
+	mu  sync.Mutex // serialises writes to out
 }
 
-func New(graph domain.Graph, editor ports.EditorPort) *Adapter {
-	return newWithIO(graph, editor, os.Stdin, os.Stdout)
+// New creates an Adapter that accepts a target directory at runtime via the set_root tool.
+func New(analyzer ports.AnalyzerPort, editorFactory func(string) ports.EditorPort) *Adapter {
+	return &Adapter{
+		analyzer:      analyzer,
+		editorFactory: editorFactory,
+		in:            os.Stdin,
+		out:           os.Stdout,
+	}
 }
 
+// newWithIO is used in tests with a pre-built graph.
 func newWithIO(graph domain.Graph, editor ports.EditorPort, in io.Reader, out io.Writer) *Adapter {
+	a := &Adapter{in: in, out: out, editor: editor}
+	a.loadGraph(graph)
+	return a
+}
+
+func (a *Adapter) loadGraph(graph domain.Graph) {
 	nodeByID := make(map[string]domain.Node, len(graph.Nodes))
 	for _, n := range graph.Nodes {
 		nodeByID[n.ID] = n
@@ -63,14 +80,9 @@ func newWithIO(graph domain.Graph, editor ports.EditorPort, in io.Reader, out io
 			refsByTo[e.To] = append(refsByTo[e.To], e.From)
 		}
 	}
-	return &Adapter{
-		graph:    graph,
-		editor:   editor,
-		nodeByID: nodeByID,
-		refsByTo: refsByTo,
-		in:       in,
-		out:      out,
-	}
+	a.graph = graph
+	a.nodeByID = nodeByID
+	a.refsByTo = refsByTo
 }
 
 func (a *Adapter) Serve(ctx context.Context) error {
@@ -89,7 +101,7 @@ func (a *Adapter) Serve(ctx context.Context) error {
 			if msg.ID == nil {
 				continue
 			}
-			result, rpcError := a.dispatch(msg)
+			result, rpcError := a.dispatch(ctx, msg)
 			resp := rpcResp{JSONRPC: "2.0", ID: msg.ID}
 			if rpcError != nil {
 				resp.Error = rpcError
@@ -109,7 +121,7 @@ func (a *Adapter) Serve(ctx context.Context) error {
 	}
 }
 
-func (a *Adapter) dispatch(msg rpcMsg) (any, *rpcErr) {
+func (a *Adapter) dispatch(ctx context.Context, msg rpcMsg) (any, *rpcErr) {
 	switch msg.Method {
 	case "initialize":
 		return map[string]any{
@@ -122,7 +134,7 @@ func (a *Adapter) dispatch(msg rpcMsg) (any, *rpcErr) {
 		return map[string]any{"tools": toolDefinitions()}, nil
 
 	case "tools/call":
-		return a.handleToolCall(msg.Params)
+		return a.handleToolCall(ctx, msg.Params)
 
 	default:
 		return nil, &rpcErr{Code: -32601, Message: "method not found: " + msg.Method}
@@ -134,7 +146,7 @@ type toolCallParams struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-func (a *Adapter) handleToolCall(raw json.RawMessage) (any, *rpcErr) {
+func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any, *rpcErr) {
 	var p toolCallParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, &rpcErr{Code: -32602, Message: "invalid params"}
@@ -142,7 +154,28 @@ func (a *Adapter) handleToolCall(raw json.RawMessage) (any, *rpcErr) {
 
 	var text string
 	switch p.Name {
+	case "root":
+		var args struct {
+			Root string `json:"root"`
+		}
+		if err := json.Unmarshal(p.Arguments, &args); err != nil || args.Root == "" {
+			return nil, &rpcErr{Code: -32602, Message: "root required"}
+		}
+		if a.analyzer == nil {
+			return nil, &rpcErr{Code: -32603, Message: "analyzer not available"}
+		}
+		graph, err := a.analyzer.Analyze(ctx, args.Root)
+		if err != nil {
+			return nil, &rpcErr{Code: -32603, Message: err.Error()}
+		}
+		a.editor = a.editorFactory(args.Root)
+		a.loadGraph(graph)
+		text = fmt.Sprintf(`{"nodes":%d,"edges":%d}`, len(graph.Nodes), len(graph.Edges))
+
 	case "find_references":
+		if a.nodeByID == nil {
+			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the root tool first"}
+		}
 		var args struct {
 			SymbolID string `json:"symbol_id"`
 		}
@@ -154,6 +187,9 @@ func (a *Adapter) handleToolCall(raw json.RawMessage) (any, *rpcErr) {
 		text = string(b)
 
 	case "find_symbols":
+		if a.nodeByID == nil {
+			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the root tool first"}
+		}
 		var args struct {
 			Query string `json:"query"`
 		}
@@ -165,6 +201,9 @@ func (a *Adapter) handleToolCall(raw json.RawMessage) (any, *rpcErr) {
 		text = string(b)
 
 	case "read_file":
+		if a.editor == nil {
+			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the root tool first"}
+		}
 		var args struct {
 			Path string `json:"path"`
 		}
@@ -248,6 +287,20 @@ func (a *Adapter) send(resp rpcResp) {
 func toolDefinitions() []map[string]any {
 	return []map[string]any{
 		{
+			"name":        "root",
+			"description": "Set the project root directory to analyze. Must be called before using find_symbols, find_references, or read_file. Re-calling with a different root switches to that project.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"root": map[string]any{
+						"type":        "string",
+						"description": "Absolute path to the project root directory to analyze",
+					},
+				},
+				"required": []string{"root"},
+			},
+		},
+		{
 			"name":        "find_references",
 			"description": "Recursively find all symbols that (transitively) reference the given symbol. Returns the upstream caller chain.",
 			"inputSchema": map[string]any{
@@ -255,7 +308,7 @@ func toolDefinitions() []map[string]any {
 				"properties": map[string]any{
 					"symbol_id": map[string]any{
 						"type":        "string",
-						"description": "Node ID of the target symbol (obtain IDs from list_symbols)",
+						"description": "Node ID of the target symbol (obtain IDs from find_symbols)",
 					},
 				},
 				"required": []string{"symbol_id"},

@@ -144,15 +144,15 @@ func TestServe_ToolsList(t *testing.T) {
 
 	result, _ := resp["result"].(map[string]any)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 3 {
-		t.Errorf("expected 3 tools, got %d", len(tools))
+	if len(tools) != 4 {
+		t.Errorf("expected 4 tools, got %d", len(tools))
 	}
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
 		m, _ := tool.(map[string]any)
 		names = append(names, m["name"].(string))
 	}
-	for _, want := range []string{"find_references", "find_symbols", "read_file"} {
+	for _, want := range []string{"root", "find_references", "find_symbols", "read_file"} {
 		found := false
 		for _, n := range names {
 			if n == want {
