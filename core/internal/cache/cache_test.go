@@ -79,14 +79,17 @@ func TestFingerprint_ChangesOnFileEdit(t *testing.T) {
 	}
 }
 
-func TestFingerprint_ChangesOnVersion(t *testing.T) {
+// Binary version is intentionally NOT part of the fingerprint — invalidation
+// across cache-format changes is handled by the schemaVersion field inside
+// the cache file. Non-schema-changing releases must reuse existing caches.
+func TestFingerprint_StableAcrossVersions(t *testing.T) {
 	root := t.TempDir()
 	write(t, filepath.Join(root, "a.go"), "package a")
 
 	fp1, _ := newTestWrapper(t, nil, WithVersion("v1")).computeFingerprint(root)
 	fp2, _ := newTestWrapper(t, nil, WithVersion("v2")).computeFingerprint(root)
-	if fp1 == fp2 {
-		t.Errorf("fingerprint should change with version")
+	if fp1 != fp2 {
+		t.Errorf("fingerprint should be stable across binary versions: %s != %s", fp1, fp2)
 	}
 }
 
@@ -177,6 +180,57 @@ func TestWrapper_MissAfterFileEdit(t *testing.T) {
 
 	if stub.calls != 2 {
 		t.Errorf("expected 2 inner calls after edit, got %d", stub.calls)
+	}
+}
+
+func TestLoadGraph_SchemaMatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fp.json")
+	want := domain.Graph{Nodes: []domain.Node{{ID: "n1", Label: "Alpha"}}}
+
+	if err := saveGraph(path, want); err != nil {
+		t.Fatalf("saveGraph: %v", err)
+	}
+	got, err := loadGraph(path)
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if len(got.Nodes) != 1 || got.Nodes[0].ID != "n1" {
+		t.Errorf("graph round-trip mismatch: got %+v", got)
+	}
+}
+
+func TestLoadGraph_SchemaMismatch_DeletesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fp.json")
+	// Write a stale entry with an old schema version directly to disk.
+	stale := `{"schemaVersion":"2025-01-01","graph":{"Nodes":[{"ID":"old"}]}}`
+	if err := os.WriteFile(path, []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadGraph(path); err == nil {
+		t.Fatal("expected error for stale schema, got nil")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("stale cache file should be deleted; stat err=%v", err)
+	}
+}
+
+func TestLoadGraph_NoSchemaVersion_DeletesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fp.json")
+	// Pre-feature cache files have no schemaVersion field at all (zero value "").
+	legacy := `{"Nodes":[{"ID":"old"}],"Edges":[]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadGraph(path); err == nil {
+		t.Fatal("expected error for legacy cache, got nil")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("legacy cache file should be deleted; stat err=%v", err)
 	}
 }
 

@@ -23,6 +23,19 @@ import (
 	"github.com/sundaycrafts/depgraph/internal/ports"
 )
 
+// currentCacheSchemaVersion is bumped whenever the on-disk cache layout or
+// the shape of cacheEntry / domain.Graph changes in a backward-incompatible
+// way. Cache files stamped with a different value are discarded on read.
+// Format: YYYY-MM-DD of the day the schema was changed.
+const currentCacheSchemaVersion = "2026-05-05"
+
+// cacheEntry is the JSON envelope persisted to disk. Wrapping the graph in
+// a versioned struct keeps domain.Graph free of cache-only concerns.
+type cacheEntry struct {
+	SchemaVersion string       `json:"schemaVersion"`
+	Graph         domain.Graph `json:"graph"`
+}
+
 // Wrapper decorates an AnalyzerPort with on-disk caching keyed by a
 // fingerprint of the source tree.
 type Wrapper struct {
@@ -197,7 +210,10 @@ func (w *Wrapper) computeFingerprint(root string) (string, error) {
 	sort.Strings(excludesSorted)
 
 	h := sha256.New()
-	fmt.Fprintf(h, "version=%s\n", w.version)
+	// Note: schema version is *not* part of the fingerprint — invalidation is
+	// handled by the schemaVersion field inside the cache file (see loadGraph).
+	// Binary version is also intentionally absent so non-schema-changing
+	// releases of depgraph reuse existing caches.
 	for _, e := range excludesSorted {
 		fmt.Fprintf(h, "exclude=%s\n", e)
 	}
@@ -212,18 +228,29 @@ func loadGraph(path string) (domain.Graph, error) {
 	if err != nil {
 		return domain.Graph{}, err
 	}
-	var graph domain.Graph
-	if err := json.Unmarshal(data, &graph); err != nil {
+	var entry cacheEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
 		return domain.Graph{}, err
 	}
-	return graph, nil
+	if entry.SchemaVersion != currentCacheSchemaVersion {
+		// Cache was written with a different schema (older or newer). Delete
+		// it and report a miss so the analyzer rebuilds with the current
+		// format.
+		_ = os.Remove(path)
+		return domain.Graph{}, fmt.Errorf("cache schema mismatch: got %q, want %q",
+			entry.SchemaVersion, currentCacheSchemaVersion)
+	}
+	return entry.Graph, nil
 }
 
 func saveGraph(path string, graph domain.Graph) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.Marshal(graph)
+	data, err := json.Marshal(cacheEntry{
+		SchemaVersion: currentCacheSchemaVersion,
+		Graph:         graph,
+	})
 	if err != nil {
 		return err
 	}
