@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -111,15 +112,32 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd.Stderr = os.Stderr
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start %s: %w", m.LSPBinary, err)
 	}
-	defer cmd.Process.Kill() //nolint:errcheck
+
+	tail := newStderrTail(50)
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		sc := bufio.NewScanner(stderr)
+		sc.Buffer(make([]byte, 64*1024), 1024*1024)
+		for sc.Scan() {
+			line := sc.Text()
+			tail.add(line)
+			logger.Debug("lsp stderr", "line", line)
+		}
+	}()
 
 	c := newConn(stdout, stdin, logger)
 	go c.readLoop() //nolint:errcheck
+
+	defer shutdownLSP(cmd, c, tail, stderrDone, logger)
 
 	rootURI := fileURI(root)
 	var initResult InitializeResult
