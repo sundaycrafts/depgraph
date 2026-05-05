@@ -9,8 +9,10 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sundaycrafts/depgraph/internal/domain"
+	"github.com/sundaycrafts/depgraph/internal/ports"
 )
 
 // stubEditor implements ports.EditorPort for tests.
@@ -280,6 +282,103 @@ func TestServe_FindSymbols(t *testing.T) {
 	}
 	if strings.Contains(text, "sym-double") {
 		t.Errorf("sym-double should not match query 'ad', got: %s", text)
+	}
+}
+
+// blockingAnalyzer blocks until release is closed, then returns the given graph.
+type blockingAnalyzer struct {
+	graph   domain.Graph
+	release chan struct{}
+}
+
+func (b *blockingAnalyzer) Analyze(ctx context.Context, root string) (domain.Graph, error) {
+	select {
+	case <-b.release:
+		return b.graph, nil
+	case <-ctx.Done():
+		return domain.Graph{}, ctx.Err()
+	}
+}
+
+func TestServe_Warmup_Async(t *testing.T) {
+	release := make(chan struct{})
+	stub := &blockingAnalyzer{
+		graph: domain.Graph{
+			Nodes: []domain.Node{{ID: "sym-1", Kind: domain.NodeKindSymbol, Label: "MyFunc"}},
+		},
+		release: release,
+	}
+
+	a := New(
+		func(excludes []string) ports.AnalyzerPort { return stub },
+		func(root string) ports.EditorPort { return &stubEditor{} },
+	)
+
+	inPR, inPW := io.Pipe()
+	outPR, outPW := io.Pipe()
+	a.in = inPR
+	a.out = outPW
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go a.Serve(ctx) //nolint:errcheck
+
+	send := func(body string) map[string]any {
+		t.Helper()
+		fmt.Fprint(inPW, frame(body))
+		scanner := bufio.NewScanner(outPR)
+		scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
+		scanner.Split(splitMCP)
+		var resp map[string]any
+		if scanner.Scan() {
+			json.Unmarshal(scanner.Bytes(), &resp) //nolint:errcheck
+		}
+		return resp
+	}
+
+	// warmup must return immediately with status:warming_up
+	warmupResp := send(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"warmup","arguments":{"root":"/tmp"}}}`)
+	if warmupResp["error"] != nil {
+		t.Fatalf("warmup returned error: %v", warmupResp["error"])
+	}
+	result, _ := warmupResp["result"].(map[string]any)
+	content, _ := result["content"].([]any)
+	item, _ := content[0].(map[string]any)
+	if item["text"] != `{"status":"warming_up"}` {
+		t.Errorf("expected warming_up status, got: %v", item["text"])
+	}
+
+	// find_symbols while warmup is in progress must return "retry shortly" error
+	findResp := send(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find_symbols","arguments":{"query":""}}}`)
+	errObj, ok := findResp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error while warming up, got result: %v", findResp)
+	}
+	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "retry shortly") {
+		t.Errorf("expected retry-shortly message, got: %s", msg)
+	}
+
+	// unblock the analyzer
+	close(release)
+
+	// poll until stateReady (give the goroutine time to finish)
+	var readyResp map[string]any
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		readyResp = send(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"find_symbols","arguments":{"query":""}}}`)
+		if readyResp["error"] == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if readyResp["error"] != nil {
+		t.Fatalf("find_symbols still failing after warmup completed: %v", readyResp["error"])
+	}
+	result2, _ := readyResp["result"].(map[string]any)
+	content2, _ := result2["content"].([]any)
+	item2, _ := content2[0].(map[string]any)
+	if !strings.Contains(item2["text"].(string), "MyFunc") {
+		t.Errorf("expected MyFunc in find_symbols result, got: %v", item2["text"])
 	}
 }
 

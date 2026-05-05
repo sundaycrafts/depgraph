@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -17,6 +16,15 @@ import (
 )
 
 const mcpProtocolVersion = "2025-11-25"
+
+type warmupState int
+
+const (
+	stateIdle    warmupState = iota // warmup not yet called
+	stateRunning                    // analysis in progress
+	stateReady                      // graph loaded and ready
+	stateFailed                     // analysis ended with error
+)
 
 // rpcMsg is an incoming JSON-RPC 2.0 message (request or notification).
 type rpcMsg struct {
@@ -43,14 +51,18 @@ type Adapter struct {
 	analyzerFactory func(excludes []string) ports.AnalyzerPort
 	editorFactory   func(string) ports.EditorPort
 
-	graph    domain.Graph
-	editor   ports.EditorPort
-	nodeByID map[string]domain.Node
-	refsByTo map[string][]string // edge.To → []edge.From for "references" edges
+	graphMu      sync.RWMutex       // protects all graph state fields below
+	state        warmupState
+	warmupErr    error
+	warmupCancel context.CancelFunc // cancels the in-flight warmup goroutine
+	graph        domain.Graph
+	editor       ports.EditorPort
+	nodeByID     map[string]domain.Node
+	refsByTo     map[string][]string // edge.To → []edge.From for "references" edges
 
-	in  io.Reader
-	out io.Writer
-	mu  sync.Mutex // serialises writes to out
+	in     io.Reader
+	out    io.Writer
+	sendMu sync.Mutex // serialises writes to out
 }
 
 // New creates an Adapter that accepts a target directory and optional exclude globs at runtime via the warmup tool.
@@ -67,6 +79,7 @@ func New(analyzerFactory func(excludes []string) ports.AnalyzerPort, editorFacto
 func newWithIO(graph domain.Graph, editor ports.EditorPort, in io.Reader, out io.Writer) *Adapter {
 	a := &Adapter{in: in, out: out, editor: editor}
 	a.loadGraph(graph)
+	a.state = stateReady
 	return a
 }
 
@@ -84,6 +97,21 @@ func (a *Adapter) loadGraph(graph domain.Graph) {
 	a.graph = graph
 	a.nodeByID = nodeByID
 	a.refsByTo = refsByTo
+}
+
+// requireReady is the gateway for tools that need a loaded graph.
+func (a *Adapter) requireReady() *rpcErr {
+	a.graphMu.RLock()
+	defer a.graphMu.RUnlock()
+	switch a.state {
+	case stateIdle:
+		return &rpcErr{Code: -32603, Message: "call warmup first"}
+	case stateRunning:
+		return &rpcErr{Code: -32603, Message: "warmup is still running, retry shortly"}
+	case stateFailed:
+		return &rpcErr{Code: -32603, Message: "warmup failed: " + a.warmupErr.Error()}
+	}
+	return nil
 }
 
 func (a *Adapter) Serve(ctx context.Context) error {
@@ -166,17 +194,40 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any,
 		if a.analyzerFactory == nil {
 			return nil, &rpcErr{Code: -32603, Message: "analyzer not available"}
 		}
-		graph, err := a.analyzerFactory(args.Excludes).Analyze(ctx, args.Root)
-		if err != nil {
-			return nil, &rpcErr{Code: -32603, Message: err.Error()}
+
+		a.graphMu.Lock()
+		if a.warmupCancel != nil {
+			a.warmupCancel()
 		}
-		a.editor = a.editorFactory(args.Root)
-		a.loadGraph(graph)
-		text = fmt.Sprintf(`{"nodes":%d,"edges":%d}`, len(graph.Nodes), len(graph.Edges))
+		wCtx, cancel := context.WithCancel(ctx)
+		a.warmupCancel = cancel
+		a.state = stateRunning
+		a.warmupErr = nil
+		a.graphMu.Unlock()
+
+		go func() {
+			defer cancel()
+			graph, err := a.analyzerFactory(args.Excludes).Analyze(wCtx, args.Root)
+			a.graphMu.Lock()
+			defer a.graphMu.Unlock()
+			if wCtx.Err() != nil {
+				return // cancelled by a subsequent warmup call
+			}
+			if err != nil {
+				a.state = stateFailed
+				a.warmupErr = err
+				return
+			}
+			a.editor = a.editorFactory(args.Root)
+			a.loadGraph(graph)
+			a.state = stateReady
+		}()
+
+		text = `{"status":"warming_up"}`
 
 	case "find_references":
-		if a.nodeByID == nil {
-			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the warmup tool first"}
+		if err := a.requireReady(); err != nil {
+			return nil, err
 		}
 		var args struct {
 			SymbolID string `json:"symbol_id"`
@@ -189,8 +240,8 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any,
 		text = string(b)
 
 	case "find_symbols":
-		if a.nodeByID == nil {
-			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the warmup tool first"}
+		if err := a.requireReady(); err != nil {
+			return nil, err
 		}
 		var args struct {
 			Query string `json:"query"`
@@ -203,8 +254,8 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any,
 		text = string(b)
 
 	case "read_file":
-		if a.editor == nil {
-			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the warmup tool first"}
+		if err := a.requireReady(); err != nil {
+			return nil, err
 		}
 		var args struct {
 			Path string `json:"path"`
@@ -281,8 +332,8 @@ func (a *Adapter) send(resp rpcResp) {
 	if err != nil {
 		return
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
 	a.out.Write(append(data, '\n')) //nolint:errcheck
 }
 
@@ -290,7 +341,7 @@ func toolDefinitions() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "warmup",
-			"description": "Analyze the project at the given root and load the dependency graph. Must be called before find_symbols, find_references, or read_file. Re-calling with a different root or excludes reloads the graph. Exclude test files and generated code to keep the graph focused (e.g. excludes: [\"**/*_test.go\", \"**/*.gen.go\", \"**/*.test.ts\", \"**/*.spec.ts\"]).",
+			"description": "Analyze the project at the given root and load the dependency graph. Runs asynchronously — returns immediately with {\"status\":\"warming_up\"} and loads the graph in the background. Call find_symbols, find_references, or read_file after warmup; they return a \"retry shortly\" error while analysis is in progress. Re-calling warmup with a different root or excludes cancels any in-flight analysis and restarts. Exclude test files and generated code to keep the graph focused (e.g. excludes: [\"**/*_test.go\", \"**/*.gen.go\", \"**/*.test.ts\", \"**/*.spec.ts\"]).",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
