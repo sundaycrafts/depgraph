@@ -41,7 +41,7 @@ func (e *rpcError) Error() string {
 // conn manages a JSON-RPC 2.0 connection over stdin/stdout of an LSP process.
 type conn struct {
 	w       io.Writer
-	scanner *bufio.Scanner
+	br      *bufio.Reader
 	mu      sync.Mutex
 	nextID  atomic.Int64
 	pending map[int64]chan message
@@ -58,23 +58,14 @@ type conn struct {
 }
 
 func newConn(r io.Reader, w io.Writer, logger *slog.Logger) *conn {
-	scanner := bufio.NewScanner(r)
-	// rust-analyzer can return references responses larger than several MB for
-	// heavily-used symbols. The buffer grows on demand up to 64 MB; smaller
-	// caps caused bufio.ErrTooLong mid-Pass 2, killing the read loop and
-	// silently failing all remaining requests.
-	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
-	scanner.Split(splitLSP)
-
-	c := &conn{
+	return &conn{
 		w:           w,
-		scanner:     scanner,
+		br:          bufio.NewReader(r),
 		pending:     make(map[int64]chan message),
 		progBeganCh: make(chan struct{}),
 		done:        make(chan struct{}),
 		logger:      logger,
 	}
-	return c
 }
 
 // call sends a request and waits for the response.
@@ -152,15 +143,57 @@ func (c *conn) send(msg *message) error {
 	return err
 }
 
+// readMessage reads one LSP-framed message body from c.br. The LSP base
+// protocol prefixes each message with `Content-Length: N\r\n\r\n`, so we
+// parse headers line by line and then read exactly N body bytes — there is
+// no per-message size limit. Returns io.EOF when the stream is cleanly
+// exhausted at a message boundary.
+func (c *conn) readMessage() ([]byte, error) {
+	contentLen := -1
+	for {
+		line, err := c.br.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		if strings.HasPrefix(line, "Content-Length:") {
+			v := strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return nil, fmt.Errorf("LSP: invalid Content-Length: %w", err)
+			}
+			contentLen = n
+		}
+	}
+	if contentLen < 0 {
+		return nil, fmt.Errorf("LSP: missing Content-Length header")
+	}
+	body := make([]byte, contentLen)
+	if _, err := io.ReadFull(c.br, body); err != nil {
+		return nil, fmt.Errorf("LSP: read body: %w", err)
+	}
+	return body, nil
+}
+
 // readLoop reads incoming messages and dispatches responses to pending callers.
 // It returns when the reader is exhausted or returns an error. On exit, c.done
 // is closed so any in-flight call() invocations unblock with errConnClosed
 // instead of deadlocking.
 func (c *conn) readLoop() error {
 	defer close(c.done)
-	for c.scanner.Scan() {
+	for {
+		body, err := c.readMessage()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
 		var msg message
-		if err := json.Unmarshal(c.scanner.Bytes(), &msg); err != nil {
+		if err := json.Unmarshal(body, &msg); err != nil {
 			continue
 		}
 		if msg.ID != nil && msg.Method != "" {
@@ -206,7 +239,6 @@ func (c *conn) readLoop() error {
 			}
 		}
 	}
-	return c.scanner.Err()
 }
 
 // waitForIdle blocks until the server has completed all background indexing.
@@ -252,44 +284,3 @@ func (c *conn) waitForIdle(ctx context.Context) {
 	}
 }
 
-// splitLSP is a bufio.SplitFunc that reads LSP Content-Length framed messages.
-func splitLSP(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
-	}
-
-	// Find header terminator \r\n\r\n
-	headerEnd := strings.Index(string(data), "\r\n\r\n")
-	if headerEnd < 0 {
-		if atEOF {
-			return 0, nil, fmt.Errorf("LSP: unexpected EOF in header")
-		}
-		return 0, nil, nil
-	}
-
-	header := string(data[:headerEnd])
-	contentLen := -1
-	for _, line := range strings.Split(header, "\r\n") {
-		if strings.HasPrefix(line, "Content-Length:") {
-			val := strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
-			contentLen, err = strconv.Atoi(val)
-			if err != nil {
-				return 0, nil, fmt.Errorf("LSP: invalid Content-Length: %w", err)
-			}
-		}
-	}
-	if contentLen < 0 {
-		return 0, nil, fmt.Errorf("LSP: missing Content-Length header")
-	}
-
-	start := headerEnd + 4
-	end := start + contentLen
-	if end > len(data) {
-		if atEOF {
-			return 0, nil, fmt.Errorf("LSP: unexpected EOF in body")
-		}
-		return 0, nil, nil
-	}
-
-	return end, data[start:end], nil
-}

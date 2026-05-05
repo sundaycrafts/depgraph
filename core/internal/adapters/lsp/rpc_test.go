@@ -35,32 +35,91 @@ func pipeConn(w io.Writer) (*conn, *io.PipeWriter, chan struct{}) {
 	return c, pw, sent
 }
 
-func TestSplitLSP(t *testing.T) {
+func TestReadMessage_Single(t *testing.T) {
 	body := `{"jsonrpc":"2.0","id":1,"result":{}}`
 	frame := fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body), body)
+	c := newConn(strings.NewReader(frame), io.Discard, slog.New(slog.DiscardHandler))
 
-	advance, token, err := splitLSP([]byte(frame), false)
+	got, err := c.readMessage()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if advance != len(frame) {
-		t.Errorf("advance=%d, want %d", advance, len(frame))
-	}
-	if string(token) != body {
-		t.Errorf("token=%q, want %q", token, body)
+	if string(got) != body {
+		t.Errorf("body=%q, want %q", got, body)
 	}
 }
 
-func TestSplitLSP_Partial(t *testing.T) {
-	body := `{"jsonrpc":"2.0"}`
-	frame := fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body)+10, body)
+func TestReadMessage_TwoBackToBack(t *testing.T) {
+	a := `{"jsonrpc":"2.0","id":1,"result":1}`
+	b := `{"jsonrpc":"2.0","id":2,"result":2}`
+	stream := fmt.Sprintf("Content-Length: %d\r\n\r\n%sContent-Length: %d\r\n\r\n%s", len(a), a, len(b), b)
+	c := newConn(strings.NewReader(stream), io.Discard, slog.New(slog.DiscardHandler))
 
-	advance, token, err := splitLSP([]byte(frame), false)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	for i, want := range []string{a, b} {
+		got, err := c.readMessage()
+		if err != nil {
+			t.Fatalf("message %d: unexpected error: %v", i, err)
+		}
+		if string(got) != want {
+			t.Errorf("message %d: body=%q, want %q", i, got, want)
+		}
 	}
-	if advance != 0 || token != nil {
-		t.Errorf("expected no progress on partial body, got advance=%d token=%q", advance, token)
+}
+
+func TestReadMessage_LargeBody(t *testing.T) {
+	// 4MB+1 body — would have triggered bufio.ErrTooLong under the old
+	// scanner-based implementation with its 4MB cap.
+	const size = 4*1024*1024 + 1
+	big := strings.Repeat("x", size)
+	body := `{"data":"` + big + `"}`
+	frame := fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body), body)
+	c := newConn(strings.NewReader(frame), io.Discard, slog.New(slog.DiscardHandler))
+
+	got, err := c.readMessage()
+	if err != nil {
+		t.Fatalf("unexpected error reading large body: %v", err)
+	}
+	if len(got) != len(body) {
+		t.Errorf("body length=%d, want %d", len(got), len(body))
+	}
+}
+
+func TestReadMessage_EOFAtMessageBoundary(t *testing.T) {
+	c := newConn(strings.NewReader(""), io.Discard, slog.New(slog.DiscardHandler))
+	_, err := c.readMessage()
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("expected io.EOF, got: %v", err)
+	}
+}
+
+func TestReadMessage_EOFInBody(t *testing.T) {
+	// Header announces 100 bytes but stream provides only 5.
+	frame := "Content-Length: 100\r\n\r\nshort"
+	c := newConn(strings.NewReader(frame), io.Discard, slog.New(slog.DiscardHandler))
+	_, err := c.readMessage()
+	if err == nil {
+		t.Fatal("expected error reading truncated body, got nil")
+	}
+	if errors.Is(err, io.EOF) {
+		t.Errorf("expected ErrUnexpectedEOF (or similar), got plain EOF: %v", err)
+	}
+}
+
+func TestReadMessage_MissingContentLength(t *testing.T) {
+	frame := "Some-Other-Header: x\r\n\r\nhello"
+	c := newConn(strings.NewReader(frame), io.Discard, slog.New(slog.DiscardHandler))
+	_, err := c.readMessage()
+	if err == nil || !strings.Contains(err.Error(), "missing Content-Length") {
+		t.Errorf("expected missing Content-Length error, got: %v", err)
+	}
+}
+
+func TestReadMessage_InvalidContentLength(t *testing.T) {
+	frame := "Content-Length: not-a-number\r\n\r\nx"
+	c := newConn(strings.NewReader(frame), io.Discard, slog.New(slog.DiscardHandler))
+	_, err := c.readMessage()
+	if err == nil || !strings.Contains(err.Error(), "invalid Content-Length") {
+		t.Errorf("expected invalid Content-Length error, got: %v", err)
 	}
 }
 
