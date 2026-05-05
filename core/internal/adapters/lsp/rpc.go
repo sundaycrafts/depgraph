@@ -47,10 +47,11 @@ type conn struct {
 	pending map[int64]chan message
 	pendMu  sync.Mutex
 
-	progMu        sync.Mutex
-	progFlight    int           // number of in-flight $/progress tokens
-	progBeganOnce sync.Once
-	progBeganCh   chan struct{} // closed when the first $/progress begin is received
+	progMu         sync.Mutex
+	progFlight     int           // number of in-flight $/progress tokens
+	progLastChange time.Time     // wall-clock time of the last begin/end/report
+	progBeganOnce  sync.Once
+	progBeganCh    chan struct{} // closed when the first $/progress begin is received
 
 	done chan struct{} // closed when readLoop exits, unblocking pending callers
 
@@ -232,6 +233,9 @@ func (c *conn) readLoop() error {
 						c.progFlight--
 					}
 				}
+				// Record activity for any begin/end/report so waitForIdle can
+				// distinguish "really idle" from "between two phases".
+				c.progLastChange = time.Now()
 				c.progMu.Unlock()
 				if signalBegin {
 					c.progBeganOnce.Do(func() { close(c.progBeganCh) })
@@ -247,9 +251,14 @@ func (c *conn) readLoop() error {
 // asynchronously and signal it via $/progress begin/end notifications.
 // We wait up to maxStartupWait for the first begin; if none arrives within
 // that window the server is assumed to be already idle and we return early.
-// Once at least one begin has been seen we poll until progFlight drops to zero.
+// Once at least one begin has been seen we poll until progFlight has been at
+// zero for the entire quietPeriod — rust-analyzer emits its work in several
+// sequentially-completed phases (workspace load, prime caches, indexing) and
+// can briefly hit zero between them, so a strict "first time it reaches zero"
+// check declares idle prematurely and symbol queries return empty.
 func (c *conn) waitForIdle(ctx context.Context) {
 	const maxStartupWait = 30 * time.Second
+	const quietPeriod = 2 * time.Second
 	const poll = 200 * time.Millisecond
 
 	c.logger.Debug("waiting for language server indexing to begin")
@@ -267,12 +276,13 @@ func (c *conn) waitForIdle(ctx context.Context) {
 		return
 	}
 
-	// Phase 2: poll until all in-flight progress tokens are resolved.
+	// Phase 2: poll until progFlight has stayed at zero for the quiet period.
 	for {
 		c.progMu.Lock()
-		idle := c.progFlight <= 0
+		flight := c.progFlight
+		lastChange := c.progLastChange
 		c.progMu.Unlock()
-		if idle {
+		if flight == 0 && time.Since(lastChange) >= quietPeriod {
 			c.logger.Info("indexing complete", "elapsed", time.Since(indexStart))
 			return
 		}
