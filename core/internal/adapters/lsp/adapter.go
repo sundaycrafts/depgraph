@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -285,6 +286,12 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		}
 	}()
 
+	totalSymbols := 0
+	for _, syms := range fileSymbols {
+		totalSymbols += len(syms)
+	}
+	succeeded, failedCount := 0, 0
+
 	for i, file := range files {
 		docURI := fileURI(file)
 		key := canonPath(file)
@@ -294,9 +301,17 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
+				// errConnClosed means the LSP read loop has died and every
+				// remaining call will fail too. Abort with a hard error rather
+				// than silently producing a degraded graph.
+				if errors.Is(err, errConnClosed) {
+					return fmt.Errorf("LSP connection closed during references pass: %d/%d symbols resolved", succeeded, totalSymbols)
+				}
+				failedCount++
 				logger.Debug("references failed", "file", file, "symbol", entry.sym.Name, "err", err)
 				continue
 			}
+			succeeded++
 			for _, ref := range refs {
 				refFile := canonPath(uriToPath(ref.URI))
 				// Cross-file references only — same-file uses are noise.
@@ -319,6 +334,7 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 	logger.Info("references resolved",
 		"files", len(files),
 		"edges", len(gb.edges)-edgesBefore,
+		"failed", failedCount,
 		"elapsed", time.Since(pass2Start),
 	)
 	return nil
