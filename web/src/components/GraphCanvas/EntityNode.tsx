@@ -14,7 +14,7 @@ export type EntityNodeData = {
 };
 export type EntityNodeType = Node<EntityNodeData, "entityNode">;
 
-export function EntityNode({ data }: NodeProps<EntityNodeType>) {
+export function EntityNode({ data, selected }: NodeProps<EntityNodeType>) {
     return (
         <div
             style={{
@@ -27,6 +27,17 @@ export function EntityNode({ data }: NodeProps<EntityNodeType>) {
                 overflow: "hidden",
             }}
         >
+            {selected && (
+                <div
+                    style={{
+                        position: "absolute",
+                        inset: 0,
+                        background: "#a855f7", // purple-500
+                        opacity: 0.5,
+                        pointerEvents: "none",
+                    }}
+                />
+            )}
             <div
                 style={{
                     position: "absolute",
