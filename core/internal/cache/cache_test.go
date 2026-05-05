@@ -93,6 +93,22 @@ func TestFingerprint_StableAcrossVersions(t *testing.T) {
 	}
 }
 
+// User excludes that don't change the walked set (e.g. duplicates of default
+// excludes) must NOT change the fingerprint. Otherwise an agent that
+// inconsistently passes "node_modules/**" once and omits it the next time
+// produces two different cache entries for the same source tree.
+func TestFingerprint_StableAcrossRedundantExcludes(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "a.ts"), "export const x = 1")
+	write(t, filepath.Join(root, "node_modules", "lib.ts"), "export const y = 1")
+
+	fp1, _ := newTestWrapper(t, nil).computeFingerprint(root)
+	fp2, _ := newTestWrapper(t, nil, WithExcludes([]string{"node_modules/**"})).computeFingerprint(root)
+	if fp1 != fp2 {
+		t.Errorf("fingerprint should be stable when user excludes are subsumed by defaults: %s vs %s", fp1, fp2)
+	}
+}
+
 func TestFingerprint_ChangesOnExcludes(t *testing.T) {
 	root := t.TempDir()
 	write(t, filepath.Join(root, "a.go"), "package a")

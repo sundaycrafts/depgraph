@@ -206,17 +206,15 @@ func (w *Wrapper) computeFingerprint(root string) (string, error) {
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
 
-	excludesSorted := append([]string{}, w.excludes...)
-	sort.Strings(excludesSorted)
-
 	h := sha256.New()
-	// Note: schema version is *not* part of the fingerprint — invalidation is
+	// Fingerprint inputs are the entries (rel, size, mtime) that survived the
+	// walk. We deliberately do NOT hash the user-supplied exclude list itself:
+	// the entries already reflect which files were skipped, so an exclude that
+	// is redundant with a default (e.g. user passes "node_modules/**" for a
+	// TypeScript project) — or any other equivalent pattern — produces the
+	// same file set and must produce the same fingerprint. Same goes for the
+	// binary version and the cache schema version: schema invalidation is
 	// handled by the schemaVersion field inside the cache file (see loadGraph).
-	// Binary version is also intentionally absent so non-schema-changing
-	// releases of depgraph reuse existing caches.
-	for _, e := range excludesSorted {
-		fmt.Fprintf(h, "exclude=%s\n", e)
-	}
 	for _, e := range entries {
 		fmt.Fprintf(h, "%s|%d|%d\n", e.rel, e.size, e.mod)
 	}
