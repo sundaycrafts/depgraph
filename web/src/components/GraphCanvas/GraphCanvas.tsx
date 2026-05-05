@@ -458,11 +458,22 @@ function GraphCanvasInner({
 
     useEffect(() => {
         setNodes((current) => {
-            const posMap = new Map(current.map((n) => [n.id, n.position]));
-            return flowNodes.map((n) => ({
-                ...n,
-                position: posMap.get(n.id) ?? n.position,
-            }));
+            const stateMap = new Map(current.map((n) => [n.id, n]));
+            return flowNodes.map((n) => {
+                const cur = stateMap.get(n.id);
+                if (!cur) return n;
+                // Preserve manual drag positions, and preserve the
+                // detached state set by Alt+click (parentId stripped).
+                // Without this the canonical parentId from flowNodes
+                // gets reapplied and absolute coordinates would be
+                // re-interpreted as folder-relative on the next render.
+                const detached = cur.parentId === undefined && n.parentId !== undefined;
+                return {
+                    ...n,
+                    position: cur.position,
+                    ...(detached ? { parentId: undefined } : {}),
+                };
+            });
         });
     }, [flowNodes, setNodes]);
 
