@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"io"
 	"os"
@@ -16,6 +17,9 @@ import (
 )
 
 const mcpProtocolVersion = "2025-11-25"
+
+//go:embed tools.json
+var toolsJSON json.RawMessage
 
 type warmupState int
 
@@ -49,13 +53,52 @@ type rpcMsg struct {
 type rpcResp struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
-	Result  any             `json:"result,omitempty"`
+	Result  mcpResult       `json:"result,omitempty"`
 	Error   *rpcErr         `json:"error,omitempty"`
 }
+
+// mcpResult is the success-result of an MCP method dispatch.
+// Sealed within the package via the unexported marker method.
+type mcpResult interface {
+	isMcpResult()
+}
+
+func (initializeResult) isMcpResult() {}
+func (toolsListResult) isMcpResult()  {}
+func (toolCallResult) isMcpResult()   {}
 
 type rpcErr struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+// MCP method-result types.
+type initializeResult struct {
+	ProtocolVersion string             `json:"protocolVersion"`
+	Capabilities    serverCapabilities `json:"capabilities"`
+	ServerInfo      serverInfo         `json:"serverInfo"`
+}
+
+type serverCapabilities struct {
+	Tools struct{} `json:"tools"`
+}
+
+type serverInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+type toolsListResult struct {
+	Tools json.RawMessage `json:"tools"`
+}
+
+type toolCallResult struct {
+	Content []toolCallContent `json:"content"`
+}
+
+type toolCallContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 // Adapter implements ports.ServerPort and serves MCP over stdio.
@@ -138,7 +181,7 @@ func (a *Adapter) getReadyEntry(root string) (*analysisEntry, *rpcErr) {
 func (a *Adapter) Serve(ctx context.Context) error {
 	scanner := bufio.NewScanner(a.in)
 	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
-	scanner.Split(splitMCP)
+	scanner.Split(splitJSONLines)
 
 	done := make(chan error, 1)
 	go func() {
@@ -171,17 +214,16 @@ func (a *Adapter) Serve(ctx context.Context) error {
 	}
 }
 
-func (a *Adapter) dispatch(ctx context.Context, msg rpcMsg) (any, *rpcErr) {
+func (a *Adapter) dispatch(ctx context.Context, msg rpcMsg) (mcpResult, *rpcErr) {
 	switch msg.Method {
 	case "initialize":
-		return map[string]any{
-			"protocolVersion": mcpProtocolVersion,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "depgraph", "version": version.Version},
+		return initializeResult{
+			ProtocolVersion: mcpProtocolVersion,
+			ServerInfo:      serverInfo{Name: "depgraph", Version: version.Version},
 		}, nil
 
 	case "tools/list":
-		return map[string]any{"tools": toolDefinitions()}, nil
+		return toolsListResult{Tools: toolsJSON}, nil
 
 	case "tools/call":
 		return a.handleToolCall(ctx, msg.Params)
@@ -196,7 +238,7 @@ type toolCallParams struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any, *rpcErr) {
+func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (mcpResult, *rpcErr) {
 	var p toolCallParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, &rpcErr{Code: -32602, Message: "invalid params"}
@@ -293,8 +335,8 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any,
 		return nil, &rpcErr{Code: -32602, Message: "unknown tool: " + p.Name}
 	}
 
-	return map[string]any{
-		"content": []map[string]any{{"type": "text", "text": text}},
+	return toolCallResult{
+		Content: []toolCallContent{{Type: "text", Text: text}},
 	}, nil
 }
 
@@ -370,68 +412,9 @@ func (a *Adapter) send(resp rpcResp) {
 	a.out.Write(append(data, '\n')) //nolint:errcheck
 }
 
-func toolDefinitions() []map[string]any {
-	return []map[string]any{
-		{
-			"name":        "warmup",
-			"description": "Analyze the project at the given root and load the dependency graph. Runs asynchronously — returns immediately with {\"status\":\"warming_up\"} and loads the graph in the background. Call all other tools after warmup; they return a \"retry shortly\" error while analysis is in progress. For mono-repo projects, because it can only make a dependency tree for a single language, call warmup once per subtree root. Use the excludes field with doublestar glob patterns to omit non-production code such as tests and generated files to keep the graph focused (e.g. excludes: [\"**/*.test.{ts,tsx}\", \"**/*.spec.{ts,tsx}\", \"**/*_test.go\"]).",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"root": map[string]any{
-						"type":        "string",
-						"description": "Absolute path to the project root directory to analyze",
-					},
-					"excludes": map[string]any{
-						"type":        "array",
-						"items":       map[string]any{"type": "string"},
-						"description": "Doublestar glob patterns relative to root to exclude from analysis (e.g. [\"**/*_test.go\", \"node_modules/**\"])",
-					},
-				},
-				"required": []string{"root"},
-			},
-		},
-		{
-			"name":        "find_references",
-			"description": "Recursively find all symbols that (transitively) reference the given symbol. Returns the upstream caller chain.",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"root": map[string]any{
-						"type":        "string",
-						"description": "Absolute path to the project root passed to warmup",
-					},
-					"symbol_id": map[string]any{
-						"type":        "string",
-						"description": "Node ID of the target symbol (obtain IDs from find_symbols)",
-					},
-				},
-				"required": []string{"root", "symbol_id"},
-			},
-		},
-		{
-			"name":        "find_symbols",
-			"description": "Search for symbols in the dependency graph by name using fuzzy matching. Returns matching symbols with their IDs, labels, kinds, and file paths. Use the returned ID with find_references.",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"root": map[string]any{
-						"type":        "string",
-						"description": "Absolute path to the project root passed to warmup",
-					},
-					"query": map[string]any{
-						"type":        "string",
-						"description": "Fuzzy search query matched against symbol names (case-insensitive subsequence match). Empty string returns all symbols.",
-					},
-				},
-				"required": []string{"root", "query"},
-			},
-		},
-	}
-}
-
-// splitMCP is a bufio.SplitFunc for newline-delimited JSON (MCP 2025-11-25 stdio transport).
-func splitMCP(data []byte, atEOF bool) (advance int, token []byte, err error) {
+// splitJSONLines is a bufio.SplitFunc that yields one JSON value per newline (NDJSON / JSON Lines).
+// Used by the MCP 2025-11-25 stdio transport.
+func splitJSONLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	if i := bytes.IndexByte(data, '\n'); i >= 0 {
 		return i + 1, bytes.TrimSpace(data[:i]), nil
 	}

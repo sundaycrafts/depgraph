@@ -38,7 +38,7 @@ func serveOne(t *testing.T, a *Adapter, inW io.Writer, outR io.Reader, reqBody s
 	// Scanner reads one response from out.
 	scanner := bufio.NewScanner(outR)
 	scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
-	scanner.Split(splitMCP)
+	scanner.Split(splitJSONLines)
 
 	done := make(chan struct{})
 	var resp map[string]any
@@ -58,10 +58,10 @@ func serveOne(t *testing.T, a *Adapter, inW io.Writer, outR io.Reader, reqBody s
 	return resp
 }
 
-func TestSplitMCP(t *testing.T) {
+func TestSplitJSONLines(t *testing.T) {
 	body := `{"jsonrpc":"2.0","id":1,"result":{}}`
 	framed := frame(body)
-	adv, tok, err := splitMCP([]byte(framed), false)
+	adv, tok, err := splitJSONLines([]byte(framed), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,10 +73,10 @@ func TestSplitMCP(t *testing.T) {
 	}
 }
 
-func TestSplitMCP_Partial(t *testing.T) {
+func TestSplitJSONLines_Partial(t *testing.T) {
 	// Partial message without trailing newline and not at EOF → no progress.
 	body := `{"jsonrpc":"2.0"}`
-	adv, tok, err := splitMCP([]byte(body), false)
+	adv, tok, err := splitJSONLines([]byte(body), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestServe_Warmup_Async(t *testing.T) {
 		fmt.Fprint(inPW, frame(body))
 		scanner := bufio.NewScanner(outPR)
 		scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
-		scanner.Split(splitMCP)
+		scanner.Split(splitJSONLines)
 		var resp map[string]any
 		if scanner.Scan() {
 			json.Unmarshal(scanner.Bytes(), &resp) //nolint:errcheck
@@ -425,7 +425,7 @@ func TestServe_Warmup_MultiRoot(t *testing.T) {
 		fmt.Fprint(inPW, frame(body))
 		scanner := bufio.NewScanner(outPR)
 		scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
-		scanner.Split(splitMCP)
+		scanner.Split(splitJSONLines)
 		var resp map[string]any
 		if scanner.Scan() {
 			json.Unmarshal(scanner.Bytes(), &resp) //nolint:errcheck
@@ -502,6 +502,50 @@ func TestServe_Warmup_MultiRoot(t *testing.T) {
 	}
 	if strings.Contains(frontendText, "GoHandler") {
 		t.Errorf("GoHandler should not appear in frontend result, got: %s", frontendText)
+	}
+}
+
+// Type definitions used only at test time to validate the shape of tools.json.
+// Production code embeds tools.json as json.RawMessage and serves it verbatim.
+type toolProperty struct {
+	Type        string        `json:"type"`
+	Description string        `json:"description,omitempty"`
+	Items       *toolProperty `json:"items,omitempty"`
+}
+
+type toolInputSchema struct {
+	Type       string                  `json:"type"`
+	Properties map[string]toolProperty `json:"properties"`
+	Required   []string                `json:"required"`
+}
+
+type toolDefinition struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema toolInputSchema `json:"inputSchema"`
+}
+
+func TestToolsJSON(t *testing.T) {
+	var defs []toolDefinition
+	dec := json.NewDecoder(bytes.NewReader(toolsJSON))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&defs); err != nil {
+		t.Fatalf("tools.json failed strict decode: %v", err)
+	}
+	if len(defs) != 3 {
+		t.Fatalf("expected 3 tool definitions, got %d", len(defs))
+	}
+	names := make(map[string]bool, len(defs))
+	for _, d := range defs {
+		names[d.Name] = true
+		if d.InputSchema.Type != "object" {
+			t.Errorf("tool %q: inputSchema.type = %q, want %q", d.Name, d.InputSchema.Type, "object")
+		}
+	}
+	for _, want := range []string{"warmup", "find_references", "find_symbols"} {
+		if !names[want] {
+			t.Errorf("tool %q not found in tools.json", want)
+		}
 	}
 }
 
