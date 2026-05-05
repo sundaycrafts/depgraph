@@ -331,11 +331,19 @@ func TestServe_Warmup_Async(t *testing.T) {
 		scanner := bufio.NewScanner(outPR)
 		scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
 		scanner.Split(splitJSONLines)
-		var resp map[string]any
-		if scanner.Scan() {
-			json.Unmarshal(scanner.Bytes(), &resp) //nolint:errcheck
+		for scanner.Scan() {
+			var resp map[string]any
+			if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+				continue
+			}
+			// Skip server-initiated notifications (e.g. warmup completion);
+			// callers want the response to their request.
+			if _, hasID := resp["id"]; !hasID {
+				continue
+			}
+			return resp
 		}
-		return resp
+		return nil
 	}
 
 	// warmup must return immediately with status:warming_up
@@ -384,6 +392,126 @@ func TestServe_Warmup_Async(t *testing.T) {
 	}
 }
 
+// readScannerMsg reads one NDJSON frame from a persistent scanner and
+// unmarshals it into a generic map. Tests that need to consume multiple
+// frames from the same pipe must share a single scanner — creating a new
+// scanner per call drops bytes left in the previous scanner's buffer.
+func readScannerMsg(t *testing.T, sc *bufio.Scanner) map[string]any {
+	t.Helper()
+	if !sc.Scan() {
+		if err := sc.Err(); err != nil {
+			t.Fatalf("scanner err: %v", err)
+		}
+		t.Fatal("scanner: no message")
+	}
+	var m map[string]any
+	if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return m
+}
+
+func TestServe_Warmup_NotifiesOnReady(t *testing.T) {
+	release := make(chan struct{})
+	stub := &blockingAnalyzer{
+		graph: domain.Graph{
+			Nodes: []domain.Node{
+				{ID: "n1", Kind: domain.NodeKindSymbol, Label: "Foo"},
+				{ID: "n2", Kind: domain.NodeKindSymbol, Label: "Bar"},
+			},
+			Edges: []domain.Edge{{ID: "e1", From: "n1", To: "n2", Kind: domain.EdgeKindReferences}},
+		},
+		release: release,
+	}
+	a := New(
+		func(excludes []string) ports.AnalyzerPort { return stub },
+		func(root string) ports.EditorPort { return &stubEditor{} },
+	)
+	inPR, inPW := io.Pipe()
+	outPR, outPW := io.Pipe()
+	a.in = inPR
+	a.out = outPW
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go a.Serve(ctx) //nolint:errcheck
+
+	sc := bufio.NewScanner(outPR)
+	sc.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
+	sc.Split(splitJSONLines)
+
+	fmt.Fprint(inPW, frame(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"warmup","arguments":{"root":"/tmp"}}}`))
+
+	resp := readScannerMsg(t, sc)
+	if resp["error"] != nil {
+		t.Fatalf("warmup error: %v", resp["error"])
+	}
+
+	close(release)
+
+	notif := readScannerMsg(t, sc)
+	if notif["method"] != "notifications/claude/channel" {
+		t.Errorf("method=%v want notifications/claude/channel", notif["method"])
+	}
+	if _, hasID := notif["id"]; hasID {
+		t.Errorf("notification must not carry an id field, got: %v", notif["id"])
+	}
+	params, _ := notif["params"].(map[string]any)
+	content, _ := params["content"].(string)
+	if !strings.Contains(content, "ready") || !strings.Contains(content, "/tmp") {
+		t.Errorf("content=%q want to mention ready+/tmp", content)
+	}
+	meta, _ := params["meta"].(map[string]any)
+	if meta["status"] != "ready" || meta["root"] != "/tmp" || meta["nodes"] != "2" {
+		t.Errorf("meta=%v want status=ready root=/tmp nodes=2", meta)
+	}
+}
+
+// failingAnalyzer returns the configured error from Analyze.
+type failingAnalyzer struct{ err error }
+
+func (f *failingAnalyzer) Analyze(_ context.Context, _ string) (domain.Graph, error) {
+	return domain.Graph{}, f.err
+}
+
+func TestServe_Warmup_NotifiesOnFailure(t *testing.T) {
+	stub := &failingAnalyzer{err: fmt.Errorf("analyzer exploded")}
+	a := New(
+		func(excludes []string) ports.AnalyzerPort { return stub },
+		func(root string) ports.EditorPort { return &stubEditor{} },
+	)
+	inPR, inPW := io.Pipe()
+	outPR, outPW := io.Pipe()
+	a.in = inPR
+	a.out = outPW
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go a.Serve(ctx) //nolint:errcheck
+
+	sc := bufio.NewScanner(outPR)
+	sc.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
+	sc.Split(splitJSONLines)
+
+	fmt.Fprint(inPW, frame(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"warmup","arguments":{"root":"/tmp"}}}`))
+
+	_ = readScannerMsg(t, sc) // warmup ack
+
+	notif := readScannerMsg(t, sc)
+	params, _ := notif["params"].(map[string]any)
+	meta, _ := params["meta"].(map[string]any)
+	if meta["status"] != "failed" {
+		t.Errorf("status=%v want failed", meta["status"])
+	}
+	if msg, _ := meta["error"].(string); !strings.Contains(msg, "analyzer exploded") {
+		t.Errorf("meta.error=%q want to contain 'analyzer exploded'", msg)
+	}
+	content, _ := params["content"].(string)
+	if !strings.Contains(content, "analyzer exploded") {
+		t.Errorf("content=%q want error message inline", content)
+	}
+}
+
 func TestServe_Warmup_MultiRoot(t *testing.T) {
 	backendRelease := make(chan struct{})
 	frontendRelease := make(chan struct{})
@@ -426,11 +554,19 @@ func TestServe_Warmup_MultiRoot(t *testing.T) {
 		scanner := bufio.NewScanner(outPR)
 		scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
 		scanner.Split(splitJSONLines)
-		var resp map[string]any
-		if scanner.Scan() {
-			json.Unmarshal(scanner.Bytes(), &resp) //nolint:errcheck
+		for scanner.Scan() {
+			var resp map[string]any
+			if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+				continue
+			}
+			// Skip server-initiated notifications (e.g. warmup completion);
+			// callers want the response to their request.
+			if _, hasID := resp["id"]; !hasID {
+				continue
+			}
+			return resp
 		}
-		return resp
+		return nil
 	}
 	nextID := func() string {
 		msgID++

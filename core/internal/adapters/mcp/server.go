@@ -6,8 +6,10 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -99,6 +101,20 @@ type toolCallResult struct {
 type toolCallContent struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+}
+
+// channelNotification is a JSON-RPC notification surfaced to the agent as
+// a <channel> element in the active conversation. Format follows the
+// convention established by mcp-bg-job.
+type channelNotification struct {
+	JSONRPC string                    `json:"jsonrpc"`
+	Method  string                    `json:"method"`
+	Params  channelNotificationParams `json:"params"`
+}
+
+type channelNotificationParams struct {
+	Content string            `json:"content"`
+	Meta    map[string]string `json:"meta"`
 }
 
 // Adapter implements ports.ServerPort and serves MCP over stdio.
@@ -279,19 +295,30 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (mcpR
 		go func() {
 			defer cancel()
 			graph, err := a.analyzerFactory(args.Excludes).Analyze(wCtx, args.Root)
+
 			entry.mu.Lock()
-			defer entry.mu.Unlock()
 			if wCtx.Err() != nil {
-				return // cancelled by a subsequent warmup call for the same root
+				entry.mu.Unlock()
+				return // superseded by a later warmup call; that one will notify
 			}
+			var (
+				status       string
+				nodes, edges int
+			)
 			if err != nil {
 				entry.state = stateFailed
 				entry.warmupErr = err
-				return
+				status = "failed"
+			} else {
+				entry.editor = a.editorFactory(args.Root)
+				loadGraphIntoEntry(entry, graph)
+				entry.state = stateReady
+				status = "ready"
+				nodes, edges = len(graph.Nodes), len(graph.Edges)
 			}
-			entry.editor = a.editorFactory(args.Root)
-			loadGraphIntoEntry(entry, graph)
-			entry.state = stateReady
+			entry.mu.Unlock()
+
+			a.notifyWarmupComplete(args.Root, status, nodes, edges, err)
 		}()
 
 		text = `{"status":"warming_up"}`
@@ -405,6 +432,34 @@ func (a *Adapter) findReferences(entry *analysisEntry, symbolID string) []domain
 func (a *Adapter) send(resp rpcResp) {
 	data, err := json.Marshal(resp)
 	if err != nil {
+		return
+	}
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+	a.out.Write(append(data, '\n')) //nolint:errcheck
+}
+
+// notifyWarmupComplete posts a notifications/claude/channel JSON-RPC message
+// so the agent learns the analysis is done (or failed) without polling
+// find_symbols / find_references. Format follows the convention established
+// by mcp-bg-job (see ~/mcp-bg-job/channel_notifier.go).
+func (a *Adapter) notifyWarmupComplete(root, status string, nodes, edges int, err error) {
+	meta := map[string]string{"root": root, "status": status}
+	var content string
+	if err != nil {
+		content = fmt.Sprintf("depgraph warmup failed for %s: %s", root, err.Error())
+		meta["error"] = err.Error()
+	} else {
+		content = fmt.Sprintf("depgraph warmup ready for %s (%d nodes, %d edges)", root, nodes, edges)
+		meta["nodes"] = strconv.Itoa(nodes)
+		meta["edges"] = strconv.Itoa(edges)
+	}
+	data, mErr := json.Marshal(channelNotification{
+		JSONRPC: "2.0",
+		Method:  "notifications/claude/channel",
+		Params:  channelNotificationParams{Content: content, Meta: meta},
+	})
+	if mErr != nil {
 		return
 	}
 	a.sendMu.Lock()
