@@ -2,12 +2,12 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -16,7 +16,7 @@ import (
 	"github.com/sundaycrafts/depgraph/internal/version"
 )
 
-const mcpProtocolVersion = "2024-11-05"
+const mcpProtocolVersion = "2025-11-25"
 
 // rpcMsg is an incoming JSON-RPC 2.0 message (request or notification).
 type rpcMsg struct {
@@ -40,8 +40,8 @@ type rpcErr struct {
 
 // Adapter implements ports.ServerPort and serves MCP over stdio.
 type Adapter struct {
-	analyzer      ports.AnalyzerPort
-	editorFactory func(string) ports.EditorPort
+	analyzerFactory func(excludes []string) ports.AnalyzerPort
+	editorFactory   func(string) ports.EditorPort
 
 	graph    domain.Graph
 	editor   ports.EditorPort
@@ -53,13 +53,13 @@ type Adapter struct {
 	mu  sync.Mutex // serialises writes to out
 }
 
-// New creates an Adapter that accepts a target directory at runtime via the set_root tool.
-func New(analyzer ports.AnalyzerPort, editorFactory func(string) ports.EditorPort) *Adapter {
+// New creates an Adapter that accepts a target directory and optional exclude globs at runtime via the warmup tool.
+func New(analyzerFactory func(excludes []string) ports.AnalyzerPort, editorFactory func(string) ports.EditorPort) *Adapter {
 	return &Adapter{
-		analyzer:      analyzer,
-		editorFactory: editorFactory,
-		in:            os.Stdin,
-		out:           os.Stdout,
+		analyzerFactory: analyzerFactory,
+		editorFactory:   editorFactory,
+		in:              os.Stdin,
+		out:             os.Stdout,
 	}
 }
 
@@ -155,17 +155,18 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any,
 
 	var text string
 	switch p.Name {
-	case "root":
+	case "warmup":
 		var args struct {
-			Root string `json:"root"`
+			Root     string   `json:"root"`
+			Excludes []string `json:"excludes"`
 		}
 		if err := json.Unmarshal(p.Arguments, &args); err != nil || args.Root == "" {
 			return nil, &rpcErr{Code: -32602, Message: "root required"}
 		}
-		if a.analyzer == nil {
+		if a.analyzerFactory == nil {
 			return nil, &rpcErr{Code: -32603, Message: "analyzer not available"}
 		}
-		graph, err := a.analyzer.Analyze(ctx, args.Root)
+		graph, err := a.analyzerFactory(args.Excludes).Analyze(ctx, args.Root)
 		if err != nil {
 			return nil, &rpcErr{Code: -32603, Message: err.Error()}
 		}
@@ -175,7 +176,7 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any,
 
 	case "find_references":
 		if a.nodeByID == nil {
-			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the root tool first"}
+			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the warmup tool first"}
 		}
 		var args struct {
 			SymbolID string `json:"symbol_id"`
@@ -189,7 +190,7 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any,
 
 	case "find_symbols":
 		if a.nodeByID == nil {
-			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the root tool first"}
+			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the warmup tool first"}
 		}
 		var args struct {
 			Query string `json:"query"`
@@ -203,7 +204,7 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any,
 
 	case "read_file":
 		if a.editor == nil {
-			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the root tool first"}
+			return nil, &rpcErr{Code: -32603, Message: "no project loaded; call the warmup tool first"}
 		}
 		var args struct {
 			Path string `json:"path"`
@@ -282,20 +283,25 @@ func (a *Adapter) send(resp rpcResp) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	fmt.Fprintf(a.out, "Content-Length: %d\r\n\r\n%s", len(data), data)
+	a.out.Write(append(data, '\n')) //nolint:errcheck
 }
 
 func toolDefinitions() []map[string]any {
 	return []map[string]any{
 		{
-			"name":        "root",
-			"description": "Set the project root directory to analyze. Must be called before using find_symbols, find_references, or read_file. Re-calling with a different root switches to that project.",
+			"name":        "warmup",
+			"description": "Analyze the project at the given root and load the dependency graph. Must be called before find_symbols, find_references, or read_file. Re-calling with a different root or excludes reloads the graph. Exclude test files and generated code to keep the graph focused (e.g. excludes: [\"**/*_test.go\", \"**/*.gen.go\", \"**/*.test.ts\", \"**/*.spec.ts\"]).",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"root": map[string]any{
 						"type":        "string",
 						"description": "Absolute path to the project root directory to analyze",
+					},
+					"excludes": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Doublestar glob patterns relative to root to exclude from analysis (e.g. [\"**/*_test.go\", \"node_modules/**\"])",
 					},
 				},
 				"required": []string{"root"},
@@ -346,40 +352,13 @@ func toolDefinitions() []map[string]any {
 	}
 }
 
-// splitMCP is a bufio.SplitFunc for Content-Length framed JSON messages
-// (same framing as LSP, used by MCP stdio transport).
+// splitMCP is a bufio.SplitFunc for newline-delimited JSON (MCP 2025-11-25 stdio transport).
 func splitMCP(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		return i + 1, bytes.TrimSpace(data[:i]), nil
 	}
-	headerEnd := strings.Index(string(data), "\r\n\r\n")
-	if headerEnd < 0 {
-		if atEOF {
-			return 0, nil, fmt.Errorf("MCP: unexpected EOF in header")
-		}
-		return 0, nil, nil
+	if atEOF && len(data) > 0 {
+		return len(data), bytes.TrimSpace(data), nil
 	}
-	header := string(data[:headerEnd])
-	contentLen := -1
-	for _, line := range strings.Split(header, "\r\n") {
-		if strings.HasPrefix(line, "Content-Length:") {
-			val := strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
-			contentLen, err = strconv.Atoi(val)
-			if err != nil {
-				return 0, nil, fmt.Errorf("MCP: invalid Content-Length: %w", err)
-			}
-		}
-	}
-	if contentLen < 0 {
-		return 0, nil, fmt.Errorf("MCP: missing Content-Length header")
-	}
-	start := headerEnd + 4
-	end := start + contentLen
-	if end > len(data) {
-		if atEOF {
-			return 0, nil, fmt.Errorf("MCP: unexpected EOF in body")
-		}
-		return 0, nil, nil
-	}
-	return end, data[start:end], nil
+	return 0, nil, nil
 }

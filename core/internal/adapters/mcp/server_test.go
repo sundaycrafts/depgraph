@@ -23,9 +23,9 @@ func (s *stubEditor) GetFileContent(path string) (string, error) {
 	return "", fmt.Errorf("file not found: %s", path)
 }
 
-// frame wraps a JSON body in Content-Length framing.
+// frame wraps a JSON body in newline-delimited format (MCP 2025-11-25 stdio transport).
 func frame(body string) string {
-	return fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body), body)
+	return body + "\n"
 }
 
 // serveOne runs the adapter, sends one request, reads one response, then cancels.
@@ -72,9 +72,9 @@ func TestSplitMCP(t *testing.T) {
 }
 
 func TestSplitMCP_Partial(t *testing.T) {
+	// Partial message without trailing newline and not at EOF → no progress.
 	body := `{"jsonrpc":"2.0"}`
-	framed := fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body)+10, body)
-	adv, tok, err := splitMCP([]byte(framed), false)
+	adv, tok, err := splitMCP([]byte(body), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestServe_Initialize(t *testing.T) {
 		t.Fatalf("unexpected error: %v", resp["error"])
 	}
 	result, _ := resp["result"].(map[string]any)
-	if result["protocolVersion"] != "2024-11-05" {
+	if result["protocolVersion"] != "2025-11-25" {
 		t.Errorf("unexpected protocolVersion: %v", result["protocolVersion"])
 	}
 }
@@ -152,7 +152,7 @@ func TestServe_ToolsList(t *testing.T) {
 		m, _ := tool.(map[string]any)
 		names = append(names, m["name"].(string))
 	}
-	for _, want := range []string{"root", "find_references", "find_symbols", "read_file"} {
+	for _, want := range []string{"warmup", "find_references", "find_symbols", "read_file"} {
 		found := false
 		for _, n := range names {
 			if n == want {

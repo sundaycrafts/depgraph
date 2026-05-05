@@ -61,7 +61,7 @@ func parseArgs() cliArgs {
 	args := flag.Args()
 	root := ""
 	if mcpMode {
-		// target dir is specified at runtime via the set_root MCP tool; positional arg is ignored
+		// target dir is specified at runtime via the warmup MCP tool; positional arg is ignored
 	} else if len(args) < 1 {
 		flag.Usage()
 		os.Exit(1)

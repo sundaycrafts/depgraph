@@ -34,26 +34,40 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	var analyzer ports.AnalyzerPort = lspadapter.New(
-		lspadapter.WithExcludeGlobs(parsed.excludes...),
-		lspadapter.WithLogger(slog.Default()),
-	)
-	cacheOpts := []cache.Option{
-		cache.WithVersion(version.Version),
-		cache.WithExcludes(parsed.excludes),
-		cache.WithLogger(slog.Default()),
-	}
-	if parsed.noCache {
-		cacheOpts = append(cacheOpts, cache.WithDisabled())
-	}
-	analyzer = cache.New(analyzer, cacheOpts...)
-
 	var server ports.ServerPort
 	if parsed.mcp {
-		server = mcpadapter.New(analyzer, func(root string) ports.EditorPort {
+		server = mcpadapter.New(func(excludes []string) ports.AnalyzerPort {
+			var a ports.AnalyzerPort = lspadapter.New(
+				lspadapter.WithExcludeGlobs(excludes...),
+				lspadapter.WithLogger(slog.Default()),
+			)
+			opts := []cache.Option{
+				cache.WithVersion(version.Version),
+				cache.WithExcludes(excludes),
+				cache.WithLogger(slog.Default()),
+			}
+			if parsed.noCache {
+				opts = append(opts, cache.WithDisabled())
+			}
+			return cache.New(a, opts...)
+		}, func(root string) ports.EditorPort {
 			return fsadapter.New(root)
 		})
 	} else {
+		var analyzer ports.AnalyzerPort = lspadapter.New(
+			lspadapter.WithExcludeGlobs(parsed.excludes...),
+			lspadapter.WithLogger(slog.Default()),
+		)
+		cacheOpts := []cache.Option{
+			cache.WithVersion(version.Version),
+			cache.WithExcludes(parsed.excludes),
+			cache.WithLogger(slog.Default()),
+		}
+		if parsed.noCache {
+			cacheOpts = append(cacheOpts, cache.WithDisabled())
+		}
+		analyzer = cache.New(analyzer, cacheOpts...)
+
 		editor := fsadapter.New(root)
 
 		slog.Info("analyzing", "root", root)
