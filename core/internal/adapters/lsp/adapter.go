@@ -135,7 +135,13 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 	}()
 
 	c := newConn(stdout, stdin, logger)
-	go c.readLoop() //nolint:errcheck
+	go func() {
+		if err := c.readLoop(); err != nil {
+			logger.Error("LSP read loop exited with error", "err", err)
+		} else {
+			logger.Debug("LSP read loop exited (EOF)")
+		}
+	}()
 
 	defer shutdownLSP(cmd, c, tail, stderrDone, logger)
 

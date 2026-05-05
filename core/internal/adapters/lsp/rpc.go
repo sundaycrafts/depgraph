@@ -59,7 +59,11 @@ type conn struct {
 
 func newConn(r io.Reader, w io.Writer, logger *slog.Logger) *conn {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	// rust-analyzer can return references responses larger than several MB for
+	// heavily-used symbols. The buffer grows on demand up to 64 MB; smaller
+	// caps caused bufio.ErrTooLong mid-Pass 2, killing the read loop and
+	// silently failing all remaining requests.
+	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
 	scanner.Split(splitLSP)
 
 	c := &conn{
