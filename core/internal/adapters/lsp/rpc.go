@@ -159,7 +159,15 @@ func (c *conn) readLoop() error {
 		if err := json.Unmarshal(c.scanner.Bytes(), &msg); err != nil {
 			continue
 		}
-		if msg.ID != nil {
+		if msg.ID != nil && msg.Method != "" {
+			// Server-initiated request. Acknowledge the ones we know about so
+			// the server can proceed; ignore others. rust-analyzer suppresses
+			// $/progress notifications until window/workDoneProgress/create is
+			// acknowledged, which is exactly what waitForIdle relies on.
+			if msg.Method == "window/workDoneProgress/create" {
+				_ = c.send(&message{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage("null")})
+			}
+		} else if msg.ID != nil {
 			c.pendMu.Lock()
 			ch, ok := c.pending[*msg.ID]
 			if ok {

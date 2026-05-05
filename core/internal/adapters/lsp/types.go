@@ -15,6 +15,7 @@ type InitializeParams struct {
 // ClientCapability is a minimal capability declaration.
 type ClientCapability struct {
 	TextDocument TextDocumentClientCapabilities `json:"textDocument"`
+	Window       WindowClientCapabilities       `json:"window"`
 }
 
 // TextDocumentClientCapabilities declares document symbol support.
@@ -25,6 +26,13 @@ type TextDocumentClientCapabilities struct {
 // DocumentSymbolClientCapabilities enables hierarchical symbols.
 type DocumentSymbolClientCapabilities struct {
 	HierarchicalDocumentSymbolSupport bool `json:"hierarchicalDocumentSymbolSupport"`
+}
+
+// WindowClientCapabilities advertises support for window-related features.
+// `workDoneProgress` is required for servers (e.g. rust-analyzer) to send
+// $/progress notifications during background indexing.
+type WindowClientCapabilities struct {
+	WorkDoneProgress bool `json:"workDoneProgress"`
 }
 
 // InitializeResult is the response to "initialize".

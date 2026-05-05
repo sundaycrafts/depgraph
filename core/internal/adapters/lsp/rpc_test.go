@@ -155,6 +155,47 @@ func TestConn_CallConnectionClosed(t *testing.T) {
 	}
 }
 
+// TestReadLoop_WindowWorkDoneProgressCreate verifies that a server-initiated
+// window/workDoneProgress/create request is acknowledged with a null result.
+// Without this acknowledgement, rust-analyzer suppresses subsequent $/progress
+// notifications, which causes waitForIdle to time out instead of detecting
+// indexing completion.
+func TestReadLoop_WindowWorkDoneProgressCreate(t *testing.T) {
+	pr, pw := io.Pipe()
+	var wmu sync.Mutex
+	var wbuf bytes.Buffer
+	c := newConn(pr, writerFunc(func(p []byte) (int, error) {
+		wmu.Lock()
+		defer wmu.Unlock()
+		return wbuf.Write(p)
+	}), slog.New(slog.DiscardHandler))
+
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		_ = c.readLoop()
+	}()
+
+	body := `{"jsonrpc":"2.0","id":42,"method":"window/workDoneProgress/create","params":{"token":"x"}}`
+	frame := fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body), body)
+	if _, err := fmt.Fprint(pw, frame); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+	_ = pw.Close()
+	<-loopDone
+
+	wmu.Lock()
+	out := wbuf.String()
+	wmu.Unlock()
+
+	if !strings.Contains(out, `"id":42`) {
+		t.Errorf("response missing id 42: %q", out)
+	}
+	if !strings.Contains(out, `"result":null`) {
+		t.Errorf("response missing null result: %q", out)
+	}
+}
+
 func TestParseSymbols_DocumentSymbol(t *testing.T) {
 	syms := []DocumentSymbol{
 		{

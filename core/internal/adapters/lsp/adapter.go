@@ -150,6 +150,7 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 					HierarchicalDocumentSymbolSupport: true,
 				},
 			},
+			Window: WindowClientCapabilities{WorkDoneProgress: true},
 		},
 	}, &initResult); err != nil {
 		return fmt.Errorf("initialize: %w", err)
