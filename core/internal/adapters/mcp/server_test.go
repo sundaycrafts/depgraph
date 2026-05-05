@@ -134,6 +134,18 @@ func TestServe_Initialize(t *testing.T) {
 	if result["protocolVersion"] != "2025-11-25" {
 		t.Errorf("unexpected protocolVersion: %v", result["protocolVersion"])
 	}
+
+	// experimental.claude/channel must be advertised; without it Claude Code
+	// silently drops our notifications/claude/channel events.
+	caps, _ := result["capabilities"].(map[string]any)
+	exp, _ := caps["experimental"].(map[string]any)
+	if _, ok := exp["claude/channel"]; !ok {
+		t.Errorf("expected capabilities.experimental.claude/channel, got: %v", caps)
+	}
+	// Instructions explain the channel event shape so the agent can react.
+	if instr, _ := result["instructions"].(string); instr == "" {
+		t.Errorf("expected non-empty instructions, got: %q", instr)
+	}
 }
 
 func TestServe_ToolsList(t *testing.T) {

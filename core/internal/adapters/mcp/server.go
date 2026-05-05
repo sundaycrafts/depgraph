@@ -79,10 +79,19 @@ type initializeResult struct {
 	ProtocolVersion string             `json:"protocolVersion"`
 	Capabilities    serverCapabilities `json:"capabilities"`
 	ServerInfo      serverInfo         `json:"serverInfo"`
+	Instructions    string             `json:"instructions,omitempty"`
 }
 
 type serverCapabilities struct {
-	Tools struct{} `json:"tools"`
+	Tools        struct{}         `json:"tools"`
+	Experimental experimentalCaps `json:"experimental"`
+}
+
+// experimentalCaps advertises non-standard MCP capabilities.
+// claude/channel signals to Claude Code that this server emits
+// notifications/claude/channel events; without it the events are dropped.
+type experimentalCaps struct {
+	ClaudeChannel struct{} `json:"claude/channel"`
 }
 
 type serverInfo struct {
@@ -236,6 +245,10 @@ func (a *Adapter) dispatch(ctx context.Context, msg rpcMsg) (mcpResult, *rpcErr)
 		return initializeResult{
 			ProtocolVersion: mcpProtocolVersion,
 			ServerInfo:      serverInfo{Name: "depgraph", Version: version.Version},
+			Instructions: `Warmup runs asynchronously and returns immediately with {"status":"warming_up"}. ` +
+				`When analysis finishes you will receive a <channel> element carrying meta.status ("ready" or "failed"), ` +
+				`meta.root, and on success meta.nodes/meta.edges. After status=ready, find_symbols / find_references ` +
+				`for that root will succeed; before then they return a "retry shortly" error.`,
 		}, nil
 
 	case "tools/list":
