@@ -26,6 +26,18 @@ const (
 	stateFailed                     // analysis ended with error
 )
 
+// analysisEntry holds all per-root analysis state.
+type analysisEntry struct {
+	mu           sync.RWMutex
+	state        warmupState
+	warmupErr    error
+	warmupCancel context.CancelFunc
+	graph        domain.Graph
+	editor       ports.EditorPort
+	nodeByID     map[string]domain.Node
+	refsByTo     map[string][]string // edge.To → []edge.From for "references" edges
+}
+
 // rpcMsg is an incoming JSON-RPC 2.0 message (request or notification).
 type rpcMsg struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -51,14 +63,8 @@ type Adapter struct {
 	analyzerFactory func(excludes []string) ports.AnalyzerPort
 	editorFactory   func(string) ports.EditorPort
 
-	graphMu      sync.RWMutex       // protects all graph state fields below
-	state        warmupState
-	warmupErr    error
-	warmupCancel context.CancelFunc // cancels the in-flight warmup goroutine
-	graph        domain.Graph
-	editor       ports.EditorPort
-	nodeByID     map[string]domain.Node
-	refsByTo     map[string][]string // edge.To → []edge.From for "references" edges
+	analysesMu sync.RWMutex
+	analyses   map[string]*analysisEntry // keyed by root path
 
 	in     io.Reader
 	out    io.Writer
@@ -70,20 +76,25 @@ func New(analyzerFactory func(excludes []string) ports.AnalyzerPort, editorFacto
 	return &Adapter{
 		analyzerFactory: analyzerFactory,
 		editorFactory:   editorFactory,
+		analyses:        make(map[string]*analysisEntry),
 		in:              os.Stdin,
 		out:             os.Stdout,
 	}
 }
 
 // newWithIO is used in tests with a pre-built graph.
-func newWithIO(graph domain.Graph, editor ports.EditorPort, in io.Reader, out io.Writer) *Adapter {
-	a := &Adapter{in: in, out: out, editor: editor}
-	a.loadGraph(graph)
-	a.state = stateReady
-	return a
+func newWithIO(root string, graph domain.Graph, editor ports.EditorPort, in io.Reader, out io.Writer) *Adapter {
+	entry := &analysisEntry{editor: editor}
+	loadGraphIntoEntry(entry, graph)
+	entry.state = stateReady
+	return &Adapter{
+		analyses: map[string]*analysisEntry{root: entry},
+		in:       in,
+		out:      out,
+	}
 }
 
-func (a *Adapter) loadGraph(graph domain.Graph) {
+func loadGraphIntoEntry(entry *analysisEntry, graph domain.Graph) {
 	nodeByID := make(map[string]domain.Node, len(graph.Nodes))
 	for _, n := range graph.Nodes {
 		nodeByID[n.ID] = n
@@ -94,24 +105,34 @@ func (a *Adapter) loadGraph(graph domain.Graph) {
 			refsByTo[e.To] = append(refsByTo[e.To], e.From)
 		}
 	}
-	a.graph = graph
-	a.nodeByID = nodeByID
-	a.refsByTo = refsByTo
+	entry.graph = graph
+	entry.nodeByID = nodeByID
+	entry.refsByTo = refsByTo
 }
 
-// requireReady is the gateway for tools that need a loaded graph.
-func (a *Adapter) requireReady() *rpcErr {
-	a.graphMu.RLock()
-	defer a.graphMu.RUnlock()
-	switch a.state {
-	case stateIdle:
-		return &rpcErr{Code: -32603, Message: "call warmup first"}
-	case stateRunning:
-		return &rpcErr{Code: -32603, Message: "warmup is still running, retry shortly"}
-	case stateFailed:
-		return &rpcErr{Code: -32603, Message: "warmup failed: " + a.warmupErr.Error()}
+// getReadyEntry looks up the analysis for root and returns it if ready, or an error otherwise.
+func (a *Adapter) getReadyEntry(root string) (*analysisEntry, *rpcErr) {
+	a.analysesMu.RLock()
+	entry := a.analyses[root]
+	a.analysesMu.RUnlock()
+
+	if entry == nil {
+		return nil, &rpcErr{Code: -32603, Message: "call warmup first for root: " + root}
 	}
-	return nil
+
+	entry.mu.RLock()
+	st := entry.state
+	warmupErr := entry.warmupErr
+	entry.mu.RUnlock()
+
+	switch st {
+	case stateReady:
+		return entry, nil
+	case stateRunning, stateIdle:
+		return nil, &rpcErr{Code: -32603, Message: "warmup is still running, retry shortly"}
+	default: // stateFailed
+		return nil, &rpcErr{Code: -32603, Message: "warmup failed: " + warmupErr.Error()}
+	}
 }
 
 func (a *Adapter) Serve(ctx context.Context) error {
@@ -195,79 +216,78 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any,
 			return nil, &rpcErr{Code: -32603, Message: "analyzer not available"}
 		}
 
-		a.graphMu.Lock()
-		if a.warmupCancel != nil {
-			a.warmupCancel()
+		a.analysesMu.Lock()
+		entry, exists := a.analyses[args.Root]
+		if !exists {
+			entry = &analysisEntry{}
+			a.analyses[args.Root] = entry
+		}
+		a.analysesMu.Unlock()
+
+		entry.mu.Lock()
+		if entry.warmupCancel != nil {
+			entry.warmupCancel()
 		}
 		wCtx, cancel := context.WithCancel(ctx)
-		a.warmupCancel = cancel
-		a.state = stateRunning
-		a.warmupErr = nil
-		a.graphMu.Unlock()
+		entry.warmupCancel = cancel
+		entry.state = stateRunning
+		entry.warmupErr = nil
+		entry.mu.Unlock()
 
 		go func() {
 			defer cancel()
 			graph, err := a.analyzerFactory(args.Excludes).Analyze(wCtx, args.Root)
-			a.graphMu.Lock()
-			defer a.graphMu.Unlock()
+			entry.mu.Lock()
+			defer entry.mu.Unlock()
 			if wCtx.Err() != nil {
-				return // cancelled by a subsequent warmup call
+				return // cancelled by a subsequent warmup call for the same root
 			}
 			if err != nil {
-				a.state = stateFailed
-				a.warmupErr = err
+				entry.state = stateFailed
+				entry.warmupErr = err
 				return
 			}
-			a.editor = a.editorFactory(args.Root)
-			a.loadGraph(graph)
-			a.state = stateReady
+			entry.editor = a.editorFactory(args.Root)
+			loadGraphIntoEntry(entry, graph)
+			entry.state = stateReady
 		}()
 
 		text = `{"status":"warming_up"}`
 
 	case "find_references":
-		if err := a.requireReady(); err != nil {
-			return nil, err
-		}
 		var args struct {
+			Root     string `json:"root"`
 			SymbolID string `json:"symbol_id"`
 		}
-		if err := json.Unmarshal(p.Arguments, &args); err != nil || args.SymbolID == "" {
+		if err := json.Unmarshal(p.Arguments, &args); err != nil || args.Root == "" {
+			return nil, &rpcErr{Code: -32602, Message: "root required"}
+		}
+		if args.SymbolID == "" {
 			return nil, &rpcErr{Code: -32602, Message: "symbol_id required"}
 		}
-		nodes := a.findReferences(args.SymbolID)
+		entry, rpcError := a.getReadyEntry(args.Root)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		nodes := a.findReferences(entry, args.SymbolID)
 		b, _ := json.Marshal(nodes)
 		text = string(b)
 
 	case "find_symbols":
-		if err := a.requireReady(); err != nil {
-			return nil, err
-		}
 		var args struct {
+			Root  string `json:"root"`
 			Query string `json:"query"`
 		}
-		if err := json.Unmarshal(p.Arguments, &args); err != nil {
-			return nil, &rpcErr{Code: -32602, Message: "invalid params"}
+		if err := json.Unmarshal(p.Arguments, &args); err != nil || args.Root == "" {
+			return nil, &rpcErr{Code: -32602, Message: "root required"}
 		}
-		nodes := a.findSymbols(args.Query)
+		entry, rpcError := a.getReadyEntry(args.Root)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		nodes := a.findSymbols(entry, args.Query)
 		b, _ := json.Marshal(nodes)
 		text = string(b)
-
-	case "read_file":
-		if err := a.requireReady(); err != nil {
-			return nil, err
-		}
-		var args struct {
-			Path string `json:"path"`
-		}
-		if err := json.Unmarshal(p.Arguments, &args); err != nil || args.Path == "" {
-			return nil, &rpcErr{Code: -32602, Message: "path required"}
-		}
-		content, err := a.editor.GetFileContent(args.Path)
-		if err != nil {
-			return nil, &rpcErr{Code: -32603, Message: err.Error()}
-		}
-		text = content
 
 	default:
 		return nil, &rpcErr{Code: -32602, Message: "unknown tool: " + p.Name}
@@ -278,11 +298,13 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (any,
 	}, nil
 }
 
-// findSymbols returns all symbol nodes whose Label fuzzy-matches query.
+// findSymbols returns all symbol nodes in entry whose Label fuzzy-matches query.
 // An empty query returns all symbols.
-func (a *Adapter) findSymbols(query string) []domain.Node {
+func (a *Adapter) findSymbols(entry *analysisEntry, query string) []domain.Node {
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
 	var result []domain.Node
-	for _, n := range a.graph.Nodes {
+	for _, n := range entry.graph.Nodes {
 		if n.Kind == domain.NodeKindSymbol && fuzzyMatch(query, n.Label) {
 			result = append(result, n)
 		}
@@ -304,22 +326,33 @@ func fuzzyMatch(query, target string) bool {
 	return qi == len(query)
 }
 
-// findReferences performs BFS upstream: given a symbol ID, returns all nodes
-// that transitively reference it (i.e. the caller chain leading to symbolID).
-func (a *Adapter) findReferences(symbolID string) []domain.Node {
+// findReferences performs BFS upstream within entry: given a symbol ID, returns
+// all nodes that transitively reference it (i.e. the caller chain leading to symbolID).
+func (a *Adapter) findReferences(entry *analysisEntry, symbolID string) []domain.Node {
+	entry.mu.RLock()
+	if _, ok := entry.nodeByID[symbolID]; !ok {
+		entry.mu.RUnlock()
+		return nil
+	}
+	// Maps are replaced wholesale on each warmup (never mutated in-place),
+	// so capturing references and releasing the lock before BFS is safe.
+	refsByTo := entry.refsByTo
+	nodeByID := entry.nodeByID
+	entry.mu.RUnlock()
+
 	seen := map[string]bool{symbolID: true}
 	queue := []string{symbolID}
 	var result []domain.Node
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		for _, fromID := range a.refsByTo[cur] {
+		for _, fromID := range refsByTo[cur] {
 			if seen[fromID] {
 				continue
 			}
 			seen[fromID] = true
 			queue = append(queue, fromID)
-			if n, ok := a.nodeByID[fromID]; ok {
+			if n, ok := nodeByID[fromID]; ok {
 				result = append(result, n)
 			}
 		}
@@ -341,7 +374,7 @@ func toolDefinitions() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "warmup",
-			"description": "Analyze the project at the given root and load the dependency graph. Runs asynchronously — returns immediately with {\"status\":\"warming_up\"} and loads the graph in the background. Call find_symbols, find_references, or read_file after warmup; they return a \"retry shortly\" error while analysis is in progress. Re-calling warmup with a different root or excludes cancels any in-flight analysis and restarts. Exclude test files and generated code to keep the graph focused (e.g. excludes: [\"**/*_test.go\", \"**/*.gen.go\", \"**/*.test.ts\", \"**/*.spec.ts\"]).",
+			"description": "Analyze the project at the given root and load the dependency graph. Runs asynchronously — returns immediately with {\"status\":\"warming_up\"} and loads the graph in the background. Call all other tools after warmup; they return a \"retry shortly\" error while analysis is in progress. For mono-repo projects, because it can only make a dependency tree for a single language, call warmup once per subtree root. Use the excludes field with doublestar glob patterns to omit non-production code such as tests and generated files to keep the graph focused (e.g. excludes: [\"**/*.test.{ts,tsx}\", \"**/*.spec.{ts,tsx}\", \"**/*_test.go\"]).",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -364,12 +397,16 @@ func toolDefinitions() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
+					"root": map[string]any{
+						"type":        "string",
+						"description": "Absolute path to the project root passed to warmup",
+					},
 					"symbol_id": map[string]any{
 						"type":        "string",
 						"description": "Node ID of the target symbol (obtain IDs from find_symbols)",
 					},
 				},
-				"required": []string{"symbol_id"},
+				"required": []string{"root", "symbol_id"},
 			},
 		},
 		{
@@ -378,26 +415,16 @@ func toolDefinitions() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
+					"root": map[string]any{
+						"type":        "string",
+						"description": "Absolute path to the project root passed to warmup",
+					},
 					"query": map[string]any{
 						"type":        "string",
 						"description": "Fuzzy search query matched against symbol names (case-insensitive subsequence match). Empty string returns all symbols.",
 					},
 				},
-				"required": []string{"query"},
-			},
-		},
-		{
-			"name":        "read_file",
-			"description": "Read the contents of a source file.",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"path": map[string]any{
-						"type":        "string",
-						"description": "Absolute path to the file",
-					},
-				},
-				"required": []string{"path"},
+				"required": []string{"root", "query"},
 			},
 		},
 	}

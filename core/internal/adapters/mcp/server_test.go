@@ -100,9 +100,10 @@ func TestFindReferences(t *testing.T) {
 			{ID: "e3", From: "D", To: "A", Kind: domain.EdgeKindReferences},
 		},
 	}
-	a := newWithIO(graph, &stubEditor{}, &bytes.Buffer{}, &bytes.Buffer{})
+	a := newWithIO("/", graph, &stubEditor{}, &bytes.Buffer{}, &bytes.Buffer{})
+	entry := a.analyses["/"]
 
-	refs := a.findReferences("B")
+	refs := a.findReferences(entry, "B")
 	ids := make(map[string]bool)
 	for _, n := range refs {
 		ids[n.ID] = true
@@ -120,7 +121,7 @@ func TestFindReferences(t *testing.T) {
 func TestServe_Initialize(t *testing.T) {
 	inPR, inPW := io.Pipe()
 	outPR, outPW := io.Pipe()
-	a := newWithIO(domain.Graph{}, &stubEditor{}, inPR, outPW)
+	a := newWithIO("/", domain.Graph{}, &stubEditor{}, inPR, outPW)
 
 	resp := serveOne(t, a, inPW, outPR,
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`,
@@ -138,7 +139,7 @@ func TestServe_Initialize(t *testing.T) {
 func TestServe_ToolsList(t *testing.T) {
 	inPR, inPW := io.Pipe()
 	outPR, outPW := io.Pipe()
-	a := newWithIO(domain.Graph{}, &stubEditor{}, inPR, outPW)
+	a := newWithIO("/", domain.Graph{}, &stubEditor{}, inPR, outPW)
 
 	resp := serveOne(t, a, inPW, outPR,
 		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
@@ -146,15 +147,15 @@ func TestServe_ToolsList(t *testing.T) {
 
 	result, _ := resp["result"].(map[string]any)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 4 {
-		t.Errorf("expected 4 tools, got %d", len(tools))
+	if len(tools) != 3 {
+		t.Errorf("expected 3 tools, got %d", len(tools))
 	}
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
 		m, _ := tool.(map[string]any)
 		names = append(names, m["name"].(string))
 	}
-	for _, want := range []string{"warmup", "find_references", "find_symbols", "read_file"} {
+	for _, want := range []string{"warmup", "find_references", "find_symbols"} {
 		found := false
 		for _, n := range names {
 			if n == want {
@@ -180,10 +181,10 @@ func TestServe_FindReferences(t *testing.T) {
 	}
 	inPR, inPW := io.Pipe()
 	outPR, outPW := io.Pipe()
-	a := newWithIO(graph, &stubEditor{}, inPR, outPW)
+	a := newWithIO("/", graph, &stubEditor{}, inPR, outPW)
 
 	resp := serveOne(t, a, inPW, outPR,
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_references","arguments":{"symbol_id":"sym-B"}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_references","arguments":{"root":"/","symbol_id":"sym-B"}}}`,
 	)
 
 	result, _ := resp["result"].(map[string]any)
@@ -228,11 +229,12 @@ func TestFindSymbols(t *testing.T) {
 			{ID: "3", Kind: domain.NodeKindFile, Label: "lib.rs"},
 		},
 	}
-	a := newWithIO(graph, &stubEditor{}, &bytes.Buffer{}, &bytes.Buffer{})
+	a := newWithIO("/", graph, &stubEditor{}, &bytes.Buffer{}, &bytes.Buffer{})
+	entry := a.analyses["/"]
 
 	assertIDs := func(t *testing.T, query string, wantIDs ...string) {
 		t.Helper()
-		nodes := a.findSymbols(query)
+		nodes := a.findSymbols(entry, query)
 		got := make(map[string]bool, len(nodes))
 		for _, n := range nodes {
 			got[n.ID] = true
@@ -250,7 +252,7 @@ func TestFindSymbols(t *testing.T) {
 	assertIDs(t, "add", "1")
 	assertIDs(t, "ad", "1")
 	assertIDs(t, "ADD", "1")
-	assertIDs(t, "dbl", "2")  // d→o→u→b→l matches subsequence
+	assertIDs(t, "dbl", "2")   // d→o→u→b→l matches subsequence
 	assertIDs(t, "", "1", "2") // empty: all symbols (not files)
 	assertIDs(t, "zzz")        // no match
 }
@@ -264,10 +266,10 @@ func TestServe_FindSymbols(t *testing.T) {
 	}
 	inPR, inPW := io.Pipe()
 	outPR, outPW := io.Pipe()
-	a := newWithIO(graph, &stubEditor{}, inPR, outPW)
+	a := newWithIO("/", graph, &stubEditor{}, inPR, outPW)
 
 	resp := serveOne(t, a, inPW, outPR,
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_symbols","arguments":{"query":"ad"}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/","query":"ad"}}}`,
 	)
 
 	result, _ := resp["result"].(map[string]any)
@@ -349,7 +351,7 @@ func TestServe_Warmup_Async(t *testing.T) {
 	}
 
 	// find_symbols while warmup is in progress must return "retry shortly" error
-	findResp := send(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find_symbols","arguments":{"query":""}}}`)
+	findResp := send(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp","query":""}}}`)
 	errObj, ok := findResp["error"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected error while warming up, got result: %v", findResp)
@@ -365,7 +367,7 @@ func TestServe_Warmup_Async(t *testing.T) {
 	var readyResp map[string]any
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		readyResp = send(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"find_symbols","arguments":{"query":""}}}`)
+		readyResp = send(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp","query":""}}}`)
 		if readyResp["error"] == nil {
 			break
 		}
@@ -382,10 +384,131 @@ func TestServe_Warmup_Async(t *testing.T) {
 	}
 }
 
+func TestServe_Warmup_MultiRoot(t *testing.T) {
+	backendRelease := make(chan struct{})
+	frontendRelease := make(chan struct{})
+
+	backendStub := &blockingAnalyzer{
+		graph: domain.Graph{
+			Nodes: []domain.Node{{ID: "go-1", Kind: domain.NodeKindSymbol, Label: "GoHandler"}},
+		},
+		release: backendRelease,
+	}
+	frontendStub := &blockingAnalyzer{
+		graph: domain.Graph{
+			Nodes: []domain.Node{{ID: "ts-1", Kind: domain.NodeKindSymbol, Label: "TsComponent"}},
+		},
+		release: frontendRelease,
+	}
+
+	stubs := make(chan ports.AnalyzerPort, 2)
+	stubs <- backendStub
+	stubs <- frontendStub
+
+	a := New(
+		func(excludes []string) ports.AnalyzerPort { return <-stubs },
+		func(root string) ports.EditorPort { return &stubEditor{} },
+	)
+
+	inPR, inPW := io.Pipe()
+	outPR, outPW := io.Pipe()
+	a.in = inPR
+	a.out = outPW
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go a.Serve(ctx) //nolint:errcheck
+
+	msgID := 0
+	send := func(body string) map[string]any {
+		t.Helper()
+		fmt.Fprint(inPW, frame(body))
+		scanner := bufio.NewScanner(outPR)
+		scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
+		scanner.Split(splitMCP)
+		var resp map[string]any
+		if scanner.Scan() {
+			json.Unmarshal(scanner.Bytes(), &resp) //nolint:errcheck
+		}
+		return resp
+	}
+	nextID := func() string {
+		msgID++
+		return fmt.Sprintf("%d", msgID)
+	}
+
+	// warmup both roots
+	r1 := send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"warmup","arguments":{"root":"/tmp/backend"}}}`, nextID()))
+	if r1["error"] != nil {
+		t.Fatalf("backend warmup error: %v", r1["error"])
+	}
+	r2 := send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"warmup","arguments":{"root":"/tmp/frontend"}}}`, nextID()))
+	if r2["error"] != nil {
+		t.Fatalf("frontend warmup error: %v", r2["error"])
+	}
+
+	// both roots should still be warming up
+	findBackend := send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp/backend","query":""}}}`, nextID()))
+	if findBackend["error"] == nil {
+		t.Fatalf("expected retry error for backend while warming up, got: %v", findBackend)
+	}
+
+	// release backend only
+	close(backendRelease)
+
+	// poll until backend is ready
+	deadline := time.Now().Add(3 * time.Second)
+	var backendReady map[string]any
+	for time.Now().Before(deadline) {
+		backendReady = send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp/backend","query":""}}}`, nextID()))
+		if backendReady["error"] == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if backendReady["error"] != nil {
+		t.Fatalf("backend find_symbols still failing: %v", backendReady["error"])
+	}
+	backendText := backendReady["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(backendText, "GoHandler") {
+		t.Errorf("expected GoHandler in backend result, got: %s", backendText)
+	}
+
+	// frontend should still be warming up (independent of backend)
+	frontendResp := send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp/frontend","query":""}}}`, nextID()))
+	if frontendResp["error"] == nil {
+		t.Fatalf("expected frontend to still be warming up, got result: %v", frontendResp)
+	}
+
+	// release frontend
+	close(frontendRelease)
+
+	// poll until frontend is ready
+	deadline = time.Now().Add(3 * time.Second)
+	var frontendReady map[string]any
+	for time.Now().Before(deadline) {
+		frontendReady = send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp/frontend","query":""}}}`, nextID()))
+		if frontendReady["error"] == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if frontendReady["error"] != nil {
+		t.Fatalf("frontend find_symbols still failing: %v", frontendReady["error"])
+	}
+	frontendText := frontendReady["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(frontendText, "TsComponent") {
+		t.Errorf("expected TsComponent in frontend result, got: %s", frontendText)
+	}
+	if strings.Contains(frontendText, "GoHandler") {
+		t.Errorf("GoHandler should not appear in frontend result, got: %s", frontendText)
+	}
+}
+
 func TestServe_UnknownMethod(t *testing.T) {
 	inPR, inPW := io.Pipe()
 	outPR, outPW := io.Pipe()
-	a := newWithIO(domain.Graph{}, &stubEditor{}, inPR, outPW)
+	a := newWithIO("/", domain.Graph{}, &stubEditor{}, inPR, outPW)
 
 	resp := serveOne(t, a, inPW, outPR,
 		`{"jsonrpc":"2.0","id":1,"method":"unknown/method","params":{}}`,
