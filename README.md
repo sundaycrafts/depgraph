@@ -148,6 +148,35 @@ Then in Claude Code you can ask things like:
 
 Claude will call `list_symbols` to look up the ID, then `find_references` to walk the caller chain.
 
+### Async warmup notifications
+
+`warmup` returns immediately with `{"status":"warming_up"}` while analysis runs in the background.
+When it finishes the server emits a `notifications/claude/channel` event; Claude Code surfaces it as a
+`<channel source="depgraph" status="ready|failed" ...>` element in the active session so Claude can
+react without polling.
+
+**No extra flag is needed.** Claude Code subscribes automatically when the server's `initialize`
+response declares `capabilities.experimental["claude/channel"]`. If your organization is on a
+Team or Enterprise plan and channels are disabled by default, an admin must set
+`channelsEnabled: true` in managed settings, or you can set it in your own
+`~/.claude/settings.json`:
+
+```json
+{
+  "channelsEnabled": true
+}
+```
+
+If you are testing outside a Claude Code session (e.g. piping JSON by hand) and need to bypass
+the research-preview allowlist, start Claude Code with:
+
+```sh
+claude --dangerously-load-development-channels server:depgraph
+```
+
+This flag is **not** required for normal use; it only applies when depgraph is loaded explicitly
+as a channel plugin rather than as a regular MCP tool server.
+
 ---
 
 ## Releasing
