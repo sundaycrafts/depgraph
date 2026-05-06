@@ -427,8 +427,8 @@ function GraphCanvasInner({
             const color = highlighted
                 ? "#2563eb" // blue-600
                 : e.kind === "defines"
-                  ? "#e2e8f0" // slate-200
-                  : "#f8fafc"; // slate-50 — lightest available
+                  ? "#f1f5f9" // slate-100
+                  : "#e2e8f0"; // slate-200
             return {
                 id: e.id,
                 source: e.from,
@@ -436,10 +436,10 @@ function GraphCanvasInner({
                 selectable: false,
                 focusable: false,
                 interactionWidth: 0,
-                // Push edges below child nodes (which auto-elevate due to
-                // parent grouping) so the line passes behind folder borders
+                // Highlighted edges float above everything; non-highlighted edges
+                // are pushed below child nodes so lines pass behind folder borders
                 // and labels.
-                zIndex: -1,
+                zIndex: highlighted ? 1 : -1,
                 style: { stroke: color },
                 markerEnd: {
                     type: MarkerType.ArrowClosed,
