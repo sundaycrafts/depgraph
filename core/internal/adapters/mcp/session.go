@@ -40,10 +40,16 @@ type LiveSession struct {
 
 	stderrDone chan struct{}
 
-	// openedURIs records the URIs we explicitly didOpened during session
-	// setup so Shutdown can release them. Currently populated only for
-	// TypeScript — see the preload step in startLiveSession.
-	openedURIs []string
+	// docMu guards openedURIs and versions. They are tracked together
+	// because every didOpen / didChange / didClose mutates both.
+	docMu sync.Mutex
+	// openedURIs records URIs currently in the LSP's open set. Populated
+	// during preload (TypeScript only) and on incoming Create / Modify
+	// events from the file watcher; entries removed on didClose.
+	openedURIs map[string]bool
+	// versions tracks the textDocument version we last sent the LSP for
+	// each URI. didOpen sets it to 1; didChange increments before send.
+	versions map[string]int64
 }
 
 // startLiveSession launches the LSP defined by spec for root, performs the
@@ -51,10 +57,17 @@ type LiveSession struct {
 // the ready-to-use session.
 //
 // For TypeScript components the construction also opens every project file
-// in tsserver's working set: tsserver's references query only surfaces
-// refs from files in the open set, and per-call open/close would make BFS
-// thrash the project state. Encapsulating this here keeps the call sites
-// (find_symbols / find_references) language-agnostic.
+// in tsserver's working set and starts a goroutine that translates events
+// from the supplied channel into didChange / didOpen / didClose so the
+// LSP's view stays in sync with disk. tsserver's references query only
+// surfaces refs from files in the open set, and per-call open/close would
+// make BFS thrash the project state. Encapsulating this here keeps the
+// call sites (find_symbols / find_references) language-agnostic.
+//
+// `events` is the file-event channel the session subscribes to. It is only
+// consumed for TypeScript; other languages receive an unread channel that
+// the caller is free to leave dangling. Pass nil to skip subscription
+// entirely (used by tests).
 //
 // Failures (LSP startup, initialize handshake, preload walk) tear down the
 // subprocess before returning.
@@ -64,6 +77,7 @@ func startLiveSession(
 	root string,
 	excludes []string,
 	spec LSPConfig,
+	events <-chan FileEvent,
 	logger *slog.Logger,
 ) (*LiveSession, error) {
 	logger = logger.With("lang", string(lang), "root", root, "lsp", spec.Command)
@@ -142,12 +156,17 @@ func startLiveSession(
 		conn:       c,
 		logger:     logger,
 		stderrDone: stderrDone,
+		openedURIs: make(map[string]bool),
+		versions:   make(map[string]int64),
 	}
 
 	if lang == lsploader.TypeScript {
 		if err := sess.preloadProject(excludes); err != nil {
 			sess.Shutdown()
 			return nil, fmt.Errorf("preload typescript project: %w", err)
+		}
+		if events != nil {
+			go sess.runEventLoop(events, excludes)
 		}
 	}
 
@@ -185,13 +204,85 @@ func (s *LiveSession) preloadProject(excludes []string) error {
 			s.logger.Warn("preload: didOpen failed", "file", file, "err", err)
 			continue
 		}
-		s.openedURIs = append(s.openedURIs, uri)
 	}
 	s.logger.Info("preload: project loaded into open set", "files", len(s.openedURIs))
 	return nil
 }
 
-// Shutdown closes any URIs we explicitly opened during preload, sends LSP
+// runEventLoop translates file watcher events into LSP document-sync
+// notifications. It returns when events is closed (the watcher's Stop
+// fires that close), so cancellation is implicit.
+//
+// Errors during read / RPC are logged at Warn — a transient failure leaves
+// the LSP slightly out of date until the next event for the same path.
+func (s *LiveSession) runEventLoop(events <-chan FileEvent, excludes []string) {
+	meta := lsploader.Meta(s.Lang)
+	allExcludes := make([]string, 0, len(meta.DefaultExcludes)+len(excludes))
+	allExcludes = append(allExcludes, meta.DefaultExcludes...)
+	allExcludes = append(allExcludes, excludes...)
+
+	matches := func(path string) bool {
+		extOK := false
+		for _, ext := range meta.FileExts {
+			if strings.HasSuffix(path, ext) {
+				extOK = true
+				break
+			}
+		}
+		if !extOK {
+			return false
+		}
+		rel, err := filepath.Rel(s.Root, path)
+		if err != nil {
+			return false
+		}
+		for _, p := range allExcludes {
+			if ok, mErr := doublestar.PathMatch(p, rel); mErr == nil && ok {
+				return false
+			}
+		}
+		return true
+	}
+
+	for ev := range events {
+		if !matches(ev.Path) {
+			continue
+		}
+		uri := fileURIFromPath(ev.Path)
+		switch ev.Op {
+		case FileCreated, FileModified:
+			text, err := os.ReadFile(ev.Path)
+			if err != nil {
+				s.logger.Warn("event: read failed", "file", ev.Path, "err", err)
+				continue
+			}
+			s.docMu.Lock()
+			alreadyOpen := s.openedURIs[uri]
+			s.docMu.Unlock()
+			if alreadyOpen {
+				if err := s.DidChange(uri, string(text)); err != nil {
+					s.logger.Warn("event: didChange failed", "file", ev.Path, "err", err)
+				}
+			} else {
+				if err := s.DidOpen(uri, langIDForFile(s.Lang, ev.Path), string(text)); err != nil {
+					s.logger.Warn("event: didOpen failed", "file", ev.Path, "err", err)
+				}
+			}
+		case FileDeleted:
+			s.docMu.Lock()
+			isOpen := s.openedURIs[uri]
+			s.docMu.Unlock()
+			if !isOpen {
+				continue
+			}
+			if err := s.DidClose(uri); err != nil {
+				s.logger.Warn("event: didClose failed", "file", ev.Path, "err", err)
+			}
+		}
+	}
+}
+
+// Shutdown closes any URIs that are currently in the open set, sends LSP
 // shutdown/exit, waits up to 5s, then SIGKILLs and reaps.
 //
 // The didClose, shutdown, and exit RPCs may legitimately fail (the server
@@ -199,9 +290,15 @@ func (s *LiveSession) preloadProject(excludes []string) error {
 // Debug because they are noise in the normal-shutdown case but useful when
 // investigating a language server that hangs.
 func (s *LiveSession) Shutdown() {
-	for _, uri := range s.openedURIs {
+	s.docMu.Lock()
+	uris := make([]string, 0, len(s.openedURIs))
+	for uri := range s.openedURIs {
+		uris = append(uris, uri)
+	}
+	s.docMu.Unlock()
+	for _, uri := range uris {
 		if err := s.DidClose(uri); err != nil {
-			s.logger.Debug("preload didClose during shutdown failed", "uri", uri, "err", err)
+			s.logger.Debug("didClose during shutdown failed", "uri", uri, "err", err)
 		}
 	}
 
@@ -298,10 +395,19 @@ func (s *LiveSession) DocumentSymbol(ctx context.Context, uri string) ([]LSPDocu
 	return nil, nil
 }
 
-// DidOpen sends textDocument/didOpen. Some servers (notably
-// typescript-language-server) require this before they will answer queries
-// for a file.
+// DidOpen sends textDocument/didOpen, registering the URI in the LSP's
+// open set with version 1. Some servers (notably typescript-language-server)
+// require this before they will answer queries for a file.
+//
+// If the URI is already open, version is reset to 1; the caller is
+// responsible for tracking that case (preload only opens unknown URIs;
+// the watcher event loop branches into DidChange when it has been opened
+// before).
 func (s *LiveSession) DidOpen(uri, languageID, text string) error {
+	s.docMu.Lock()
+	s.openedURIs[uri] = true
+	s.versions[uri] = 1
+	s.docMu.Unlock()
 	return s.conn.notify("textDocument/didOpen", map[string]any{
 		"textDocument": map[string]any{
 			"uri":        uri,
@@ -312,9 +418,32 @@ func (s *LiveSession) DidOpen(uri, languageID, text string) error {
 	})
 }
 
+// DidChange sends textDocument/didChange with a full-text replacement
+// (TextDocumentSyncKind: Full). The version is monotonically incremented
+// per URI so the LSP can detect out-of-order updates.
+func (s *LiveSession) DidChange(uri, text string) error {
+	s.docMu.Lock()
+	s.versions[uri]++
+	v := s.versions[uri]
+	s.docMu.Unlock()
+	return s.conn.notify("textDocument/didChange", map[string]any{
+		"textDocument": map[string]any{
+			"uri":     uri,
+			"version": v,
+		},
+		"contentChanges": []map[string]any{
+			{"text": text},
+		},
+	})
+}
+
 // DidClose sends textDocument/didClose, releasing any working-set state the
-// server kept for the document.
+// server kept for the document and removing it from our open set tracking.
 func (s *LiveSession) DidClose(uri string) error {
+	s.docMu.Lock()
+	delete(s.openedURIs, uri)
+	delete(s.versions, uri)
+	s.docMu.Unlock()
 	return s.conn.notify("textDocument/didClose", map[string]any{
 		"textDocument": map[string]any{"uri": uri},
 	})

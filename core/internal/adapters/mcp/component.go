@@ -27,8 +27,49 @@ type Component struct {
 	Root     string
 	Excludes []string
 
+	// watcher fans out filesystem changes under Root to subscribers. The
+	// TypeScript LiveSession subscribes to keep tsserver's open buffers in
+	// sync with disk; other languages do not (gopls / rust-analyzer have
+	// their own watchers). Always non-nil for components registered via
+	// ComponentManager.AddComponent — failures to construct the watcher
+	// abort registration.
+	watcher fileEventSource
+
 	mu       sync.RWMutex
 	sessions map[lsploader.Language]*sessionEntry
+}
+
+// SubscribeFiles returns a channel that receives filesystem events under
+// the component root. The channel is closed when the component shuts down
+// (or immediately if the watcher is unavailable).
+func (c *Component) SubscribeFiles() <-chan FileEvent {
+	if c.watcher == nil {
+		ch := make(chan FileEvent)
+		close(ch)
+		return ch
+	}
+	return c.watcher.Subscribe()
+}
+
+// Shutdown stops the file watcher (closing every subscriber channel and
+// terminating subscriber goroutines) before tearing down each session.
+// Calling order matters: subscribers must drain before LSP shutdown so we
+// do not race a final didChange against the LSP exit handshake.
+func (c *Component) Shutdown() {
+	if c.watcher != nil {
+		c.watcher.Stop()
+	}
+	for _, entry := range c.snapshotSessions() {
+		entry.mu.Lock()
+		sess := entry.session
+		entry.session = nil
+		entry.state = ComponentFailed
+		entry.err = errors.New("shutdown")
+		entry.mu.Unlock()
+		if sess != nil {
+			sess.Shutdown()
+		}
+	}
 }
 
 // sessionEntry tracks a single (language) session within a component.
@@ -118,11 +159,15 @@ func (c *Component) readySessions() []*LiveSession {
 // ComponentManager tracks every component registered in the MCP session and
 // owns the corresponding LiveSession lifetimes.
 type ComponentManager struct {
-	cfg      *Config
-	locator  lsploader.Locator
-	logger   *slog.Logger
-	parent   context.Context // cancelled at session shutdown
-	rootCtx  context.CancelFunc
+	cfg     *Config
+	locator lsploader.Locator
+	logger  *slog.Logger
+	parent  context.Context // cancelled at session shutdown
+	rootCtx context.CancelFunc
+
+	// watcherFactory builds the per-component filesystem watcher. Tests
+	// inject a fake; production uses NewFileWatcher.
+	watcherFactory func(root string, excludes []string, logger *slog.Logger) (fileEventSource, error)
 
 	mu         sync.RWMutex
 	components map[string]*Component
@@ -134,11 +179,14 @@ type ComponentManager struct {
 func NewComponentManager(parent context.Context, cfg *Config, locator lsploader.Locator, logger *slog.Logger) *ComponentManager {
 	ctx, cancel := context.WithCancel(parent)
 	return &ComponentManager{
-		cfg:        cfg,
-		locator:    locator,
-		logger:     logger,
-		parent:     ctx,
-		rootCtx:    cancel,
+		cfg:     cfg,
+		locator: locator,
+		logger:  logger,
+		parent:  ctx,
+		rootCtx: cancel,
+		watcherFactory: func(root string, excludes []string, l *slog.Logger) (fileEventSource, error) {
+			return NewFileWatcher(root, excludes, l)
+		},
 		components: make(map[string]*Component),
 	}
 }
@@ -194,9 +242,24 @@ func (m *ComponentManager) AddComponent(root string, excludes []string) (*Compon
 		return nil, err
 	}
 
+	// Combine default + user excludes for the watcher so it skips the
+	// same trees the analysis does. We use the union across detected
+	// languages — fsnotify watches directories, and a directory excluded
+	// for one language is excluded for every language we'd open here.
+	allExcludes := append([]string(nil), excludes...)
+	for _, lang := range langs {
+		allExcludes = append(allExcludes, lsploader.Meta(lang).DefaultExcludes...)
+	}
+	watcher, err := m.watcherFactory(abs, allExcludes, m.logger)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("start file watcher: %w", err)
+	}
+
 	comp := &Component{
 		Root:     abs,
 		Excludes: append([]string(nil), excludes...),
+		watcher:  watcher,
 		sessions: make(map[lsploader.Language]*sessionEntry),
 	}
 	for _, lang := range langs {
@@ -229,7 +292,10 @@ func (m *ComponentManager) launchSession(comp *Component, lang lsploader.Languag
 	spec := specs[0]
 
 	logger.Info("starting LSP session", "binary", spec.Command)
-	sess, err := startLiveSession(m.parent, lang, comp.Root, comp.Excludes, spec, logger)
+	// Subscribe before LSP startup so any events that fire during preload
+	// are queued and processed once the event loop starts.
+	events := comp.SubscribeFiles()
+	sess, err := startLiveSession(m.parent, lang, comp.Root, comp.Excludes, spec, events, logger)
 	if err != nil {
 		m.markFailed(comp, lang, fmt.Errorf("start LSP: %w", err))
 		return
@@ -273,9 +339,10 @@ func (m *ComponentManager) markFailed(comp *Component, lang lsploader.Language, 
 	entry.mu.Unlock()
 }
 
-// ShutdownAll terminates every registered LSP session. Safe to call multiple
-// times. Cancels the parent context first so any pending launchSession
-// goroutines short-circuit before issuing more LSP requests.
+// ShutdownAll terminates every registered component (its watcher and
+// every LSP session). Safe to call multiple times. Cancels the parent
+// context first so any pending launchSession goroutines short-circuit
+// before issuing more LSP requests.
 func (m *ComponentManager) ShutdownAll() {
 	m.rootCtx()
 
@@ -289,22 +356,11 @@ func (m *ComponentManager) ShutdownAll() {
 
 	var wg sync.WaitGroup
 	for _, comp := range comps {
-		for _, entry := range comp.snapshotSessions() {
-			entry.mu.Lock()
-			sess := entry.session
-			entry.session = nil
-			entry.state = ComponentFailed
-			entry.err = errors.New("shutdown")
-			entry.mu.Unlock()
-			if sess == nil {
-				continue
-			}
-			wg.Add(1)
-			go func(s *LiveSession) {
-				defer wg.Done()
-				s.Shutdown()
-			}(sess)
-		}
+		wg.Add(1)
+		go func(c *Component) {
+			defer wg.Done()
+			c.Shutdown()
+		}(comp)
 	}
 	wg.Wait()
 }
