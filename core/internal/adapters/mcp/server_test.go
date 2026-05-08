@@ -7,36 +7,52 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/sundaycrafts/depgraph/internal/domain"
-	"github.com/sundaycrafts/depgraph/internal/ports"
+	"github.com/sundaycrafts/depgraph/internal/lsploader"
 )
-
-// stubEditor implements ports.EditorPort for tests.
-type stubEditor struct{ files map[string]string }
-
-func (s *stubEditor) GetFileContent(path string) (string, error) {
-	if c, ok := s.files[path]; ok {
-		return c, nil
-	}
-	return "", fmt.Errorf("file not found: %s", path)
-}
 
 // frame wraps a JSON body in newline-delimited format (MCP 2025-11-25 stdio transport).
 func frame(body string) string {
 	return body + "\n"
 }
 
-// serveOne runs the adapter, sends one request, reads one response, then cancels.
-func serveOne(t *testing.T, a *Adapter, inW io.Writer, outR io.Reader, reqBody string) map[string]any {
+// fakeLocator implements lsploader.Locator. By default it claims every
+// binary is missing — sufficient for tests that never call add_component.
+type fakeLocator struct {
+	available map[string]string
+}
+
+func (f fakeLocator) LookupBinary(name string) (string, error) {
+	if path, ok := f.available[name]; ok {
+		return path, nil
+	}
+	return "", fmt.Errorf("not found: %s", name)
+}
+
+func newTestAdapter(t *testing.T) *Adapter {
 	t.Helper()
+	cfg, err := LoadEmbeddedConfig()
+	if err != nil {
+		t.Fatalf("load embedded config: %v", err)
+	}
+	mgr := NewComponentManager(context.Background(), cfg, fakeLocator{}, slog.Default())
+	return New(mgr, NewNoopInitializer(), slog.Default())
+}
+
+// serveOne runs the adapter, sends one request, reads one response, then cancels.
+func serveOne(t *testing.T, a *Adapter, reqBody string) map[string]any {
+	t.Helper()
+	inPR, inPW := io.Pipe()
+	outPR, outPW := io.Pipe()
+	a.in = inPR
+	a.out = outPW
+
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Scanner reads one response from out.
-	scanner := bufio.NewScanner(outR)
+	scanner := bufio.NewScanner(outPR)
 	scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
 	scanner.Split(splitJSONLines)
 
@@ -45,13 +61,13 @@ func serveOne(t *testing.T, a *Adapter, inW io.Writer, outR io.Reader, reqBody s
 	go func() {
 		defer close(done)
 		if scanner.Scan() {
-			json.Unmarshal(scanner.Bytes(), &resp) //nolint:errcheck
+			_ = json.Unmarshal(scanner.Bytes(), &resp)
 		}
 	}()
 
 	go a.Serve(ctx) //nolint:errcheck
 
-	fmt.Fprint(inW, frame(reqBody))
+	fmt.Fprint(inPW, frame(reqBody))
 
 	<-done
 	cancel()
@@ -74,7 +90,6 @@ func TestSplitJSONLines(t *testing.T) {
 }
 
 func TestSplitJSONLines_Partial(t *testing.T) {
-	// Partial message without trailing newline and not at EOF → no progress.
 	body := `{"jsonrpc":"2.0"}`
 	adv, tok, err := splitJSONLines([]byte(body), false)
 	if err != nil {
@@ -82,132 +97,6 @@ func TestSplitJSONLines_Partial(t *testing.T) {
 	}
 	if adv != 0 || tok != nil {
 		t.Errorf("expected no progress, got advance=%d token=%q", adv, tok)
-	}
-}
-
-func TestFindReferences(t *testing.T) {
-	// Graph: A→B, C→B (direct references to B); D→A (indirect via A)
-	graph := domain.Graph{
-		Nodes: []domain.Node{
-			{ID: "A", Kind: domain.NodeKindSymbol, Label: "FuncA"},
-			{ID: "B", Kind: domain.NodeKindSymbol, Label: "FuncB"},
-			{ID: "C", Kind: domain.NodeKindSymbol, Label: "FuncC"},
-			{ID: "D", Kind: domain.NodeKindSymbol, Label: "FuncD"},
-		},
-		Edges: []domain.Edge{
-			{ID: "e1", From: "A", To: "B", Kind: domain.EdgeKindReferences},
-			{ID: "e2", From: "C", To: "B", Kind: domain.EdgeKindReferences},
-			{ID: "e3", From: "D", To: "A", Kind: domain.EdgeKindReferences},
-		},
-	}
-	a := newWithIO("/", graph, &stubEditor{}, &bytes.Buffer{}, &bytes.Buffer{})
-	entry := a.analyses["/"]
-
-	refs := a.findReferences(entry, "B")
-	ids := make(map[string]bool)
-	for _, n := range refs {
-		ids[n.ID] = true
-	}
-	for _, want := range []string{"A", "C", "D"} {
-		if !ids[want] {
-			t.Errorf("expected %s in references of B, got %v", want, ids)
-		}
-	}
-	if ids["B"] {
-		t.Error("B should not appear in its own references")
-	}
-}
-
-func TestServe_Initialize(t *testing.T) {
-	inPR, inPW := io.Pipe()
-	outPR, outPW := io.Pipe()
-	a := newWithIO("/", domain.Graph{}, &stubEditor{}, inPR, outPW)
-
-	resp := serveOne(t, a, inPW, outPR,
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`,
-	)
-
-	if resp["error"] != nil {
-		t.Fatalf("unexpected error: %v", resp["error"])
-	}
-	result, _ := resp["result"].(map[string]any)
-	if result["protocolVersion"] != "2025-11-25" {
-		t.Errorf("unexpected protocolVersion: %v", result["protocolVersion"])
-	}
-
-	// experimental.claude/channel must be advertised; without it Claude Code
-	// silently drops our notifications/claude/channel events.
-	caps, _ := result["capabilities"].(map[string]any)
-	exp, _ := caps["experimental"].(map[string]any)
-	if _, ok := exp["claude/channel"]; !ok {
-		t.Errorf("expected capabilities.experimental.claude/channel, got: %v", caps)
-	}
-	// Instructions explain the channel event shape so the agent can react.
-	if instr, _ := result["instructions"].(string); instr == "" {
-		t.Errorf("expected non-empty instructions, got: %q", instr)
-	}
-}
-
-func TestServe_ToolsList(t *testing.T) {
-	inPR, inPW := io.Pipe()
-	outPR, outPW := io.Pipe()
-	a := newWithIO("/", domain.Graph{}, &stubEditor{}, inPR, outPW)
-
-	resp := serveOne(t, a, inPW, outPR,
-		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
-	)
-
-	result, _ := resp["result"].(map[string]any)
-	tools, _ := result["tools"].([]any)
-	if len(tools) != 3 {
-		t.Errorf("expected 3 tools, got %d", len(tools))
-	}
-	names := make([]string, 0, len(tools))
-	for _, tool := range tools {
-		m, _ := tool.(map[string]any)
-		names = append(names, m["name"].(string))
-	}
-	for _, want := range []string{"warmup", "find_references", "find_symbols"} {
-		found := false
-		for _, n := range names {
-			if n == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("tool %q not in list: %v", want, names)
-		}
-	}
-}
-
-func TestServe_FindReferences(t *testing.T) {
-	graph := domain.Graph{
-		Nodes: []domain.Node{
-			{ID: "sym-A", Kind: domain.NodeKindSymbol, Label: "Alpha"},
-			{ID: "sym-B", Kind: domain.NodeKindSymbol, Label: "Beta"},
-		},
-		Edges: []domain.Edge{
-			{ID: "e1", From: "sym-A", To: "sym-B", Kind: domain.EdgeKindReferences},
-		},
-	}
-	inPR, inPW := io.Pipe()
-	outPR, outPW := io.Pipe()
-	a := newWithIO("/", graph, &stubEditor{}, inPR, outPW)
-
-	resp := serveOne(t, a, inPW, outPR,
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_references","arguments":{"root":"/","symbol_id":"sym-B"}}}`,
-	)
-
-	result, _ := resp["result"].(map[string]any)
-	content, _ := result["content"].([]any)
-	if len(content) == 0 {
-		t.Fatal("expected content in result")
-	}
-	item, _ := content[0].(map[string]any)
-	text, _ := item["text"].(string)
-	if !strings.Contains(text, "Alpha") {
-		t.Errorf("expected Alpha in find_references result, got: %s", text)
 	}
 }
 
@@ -233,428 +122,126 @@ func TestFuzzyMatch(t *testing.T) {
 	}
 }
 
-func TestFindSymbols(t *testing.T) {
-	graph := domain.Graph{
-		Nodes: []domain.Node{
-			{ID: "1", Kind: domain.NodeKindSymbol, Label: "add"},
-			{ID: "2", Kind: domain.NodeKindSymbol, Label: "double"},
-			{ID: "3", Kind: domain.NodeKindFile, Label: "lib.rs"},
-		},
-	}
-	a := newWithIO("/", graph, &stubEditor{}, &bytes.Buffer{}, &bytes.Buffer{})
-	entry := a.analyses["/"]
-
-	assertIDs := func(t *testing.T, query string, wantIDs ...string) {
-		t.Helper()
-		nodes := a.findSymbols(entry, query)
-		got := make(map[string]bool, len(nodes))
-		for _, n := range nodes {
-			got[n.ID] = true
-		}
-		for _, id := range wantIDs {
-			if !got[id] {
-				t.Errorf("query=%q: expected ID %q in result %v", query, id, got)
-			}
-		}
-		if len(nodes) != len(wantIDs) {
-			t.Errorf("query=%q: got %d results, want %d", query, len(nodes), len(wantIDs))
-		}
-	}
-
-	assertIDs(t, "add", "1")
-	assertIDs(t, "ad", "1")
-	assertIDs(t, "ADD", "1")
-	assertIDs(t, "dbl", "2")   // d→o→u→b→l matches subsequence
-	assertIDs(t, "", "1", "2") // empty: all symbols (not files)
-	assertIDs(t, "zzz")        // no match
-}
-
-func TestServe_FindSymbols(t *testing.T) {
-	graph := domain.Graph{
-		Nodes: []domain.Node{
-			{ID: "sym-add", Kind: domain.NodeKindSymbol, Label: "add"},
-			{ID: "sym-double", Kind: domain.NodeKindSymbol, Label: "double"},
-		},
-	}
-	inPR, inPW := io.Pipe()
-	outPR, outPW := io.Pipe()
-	a := newWithIO("/", graph, &stubEditor{}, inPR, outPW)
-
-	resp := serveOne(t, a, inPW, outPR,
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/","query":"ad"}}}`,
+func TestServe_Initialize(t *testing.T) {
+	a := newTestAdapter(t)
+	resp := serveOne(t, a,
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`,
 	)
-
-	result, _ := resp["result"].(map[string]any)
-	content, _ := result["content"].([]any)
-	if len(content) == 0 {
-		t.Fatal("expected content in result")
-	}
-	item, _ := content[0].(map[string]any)
-	text, _ := item["text"].(string)
-	if !strings.Contains(text, "sym-add") {
-		t.Errorf("expected sym-add in find_symbols result, got: %s", text)
-	}
-	if strings.Contains(text, "sym-double") {
-		t.Errorf("sym-double should not match query 'ad', got: %s", text)
-	}
-}
-
-// blockingAnalyzer blocks until release is closed, then returns the given graph.
-type blockingAnalyzer struct {
-	graph   domain.Graph
-	release chan struct{}
-}
-
-func (b *blockingAnalyzer) Analyze(ctx context.Context, root string) (domain.Graph, error) {
-	select {
-	case <-b.release:
-		return b.graph, nil
-	case <-ctx.Done():
-		return domain.Graph{}, ctx.Err()
-	}
-}
-
-func TestServe_Warmup_Async(t *testing.T) {
-	release := make(chan struct{})
-	stub := &blockingAnalyzer{
-		graph: domain.Graph{
-			Nodes: []domain.Node{{ID: "sym-1", Kind: domain.NodeKindSymbol, Label: "MyFunc"}},
-		},
-		release: release,
-	}
-
-	a := New(
-		func(excludes []string) ports.AnalyzerPort { return stub },
-		func(root string) ports.EditorPort { return &stubEditor{} },
-	)
-
-	inPR, inPW := io.Pipe()
-	outPR, outPW := io.Pipe()
-	a.in = inPR
-	a.out = outPW
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go a.Serve(ctx) //nolint:errcheck
-
-	send := func(body string) map[string]any {
-		t.Helper()
-		fmt.Fprint(inPW, frame(body))
-		scanner := bufio.NewScanner(outPR)
-		scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
-		scanner.Split(splitJSONLines)
-		for scanner.Scan() {
-			var resp map[string]any
-			if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
-				continue
-			}
-			// Skip server-initiated notifications (e.g. warmup completion);
-			// callers want the response to their request.
-			if _, hasID := resp["id"]; !hasID {
-				continue
-			}
-			return resp
-		}
-		return nil
-	}
-
-	// warmup must return immediately with status:warming_up
-	warmupResp := send(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"warmup","arguments":{"root":"/tmp"}}}`)
-	if warmupResp["error"] != nil {
-		t.Fatalf("warmup returned error: %v", warmupResp["error"])
-	}
-	result, _ := warmupResp["result"].(map[string]any)
-	content, _ := result["content"].([]any)
-	item, _ := content[0].(map[string]any)
-	if item["text"] != `{"status":"warming_up"}` {
-		t.Errorf("expected warming_up status, got: %v", item["text"])
-	}
-
-	// find_symbols while warmup is in progress must return "retry shortly" error
-	findResp := send(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp","query":""}}}`)
-	errObj, ok := findResp["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error while warming up, got result: %v", findResp)
-	}
-	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "retry shortly") {
-		t.Errorf("expected retry-shortly message, got: %s", msg)
-	}
-
-	// unblock the analyzer
-	close(release)
-
-	// poll until stateReady (give the goroutine time to finish)
-	var readyResp map[string]any
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		readyResp = send(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp","query":""}}}`)
-		if readyResp["error"] == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if readyResp["error"] != nil {
-		t.Fatalf("find_symbols still failing after warmup completed: %v", readyResp["error"])
-	}
-	result2, _ := readyResp["result"].(map[string]any)
-	content2, _ := result2["content"].([]any)
-	item2, _ := content2[0].(map[string]any)
-	if !strings.Contains(item2["text"].(string), "MyFunc") {
-		t.Errorf("expected MyFunc in find_symbols result, got: %v", item2["text"])
-	}
-}
-
-// readScannerMsg reads one NDJSON frame from a persistent scanner and
-// unmarshals it into a generic map. Tests that need to consume multiple
-// frames from the same pipe must share a single scanner — creating a new
-// scanner per call drops bytes left in the previous scanner's buffer.
-func readScannerMsg(t *testing.T, sc *bufio.Scanner) map[string]any {
-	t.Helper()
-	if !sc.Scan() {
-		if err := sc.Err(); err != nil {
-			t.Fatalf("scanner err: %v", err)
-		}
-		t.Fatal("scanner: no message")
-	}
-	var m map[string]any
-	if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	return m
-}
-
-func TestServe_Warmup_NotifiesOnReady(t *testing.T) {
-	release := make(chan struct{})
-	stub := &blockingAnalyzer{
-		graph: domain.Graph{
-			Nodes: []domain.Node{
-				{ID: "n1", Kind: domain.NodeKindSymbol, Label: "Foo"},
-				{ID: "n2", Kind: domain.NodeKindSymbol, Label: "Bar"},
-			},
-			Edges: []domain.Edge{{ID: "e1", From: "n1", To: "n2", Kind: domain.EdgeKindReferences}},
-		},
-		release: release,
-	}
-	a := New(
-		func(excludes []string) ports.AnalyzerPort { return stub },
-		func(root string) ports.EditorPort { return &stubEditor{} },
-	)
-	inPR, inPW := io.Pipe()
-	outPR, outPW := io.Pipe()
-	a.in = inPR
-	a.out = outPW
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go a.Serve(ctx) //nolint:errcheck
-
-	sc := bufio.NewScanner(outPR)
-	sc.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
-	sc.Split(splitJSONLines)
-
-	fmt.Fprint(inPW, frame(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"warmup","arguments":{"root":"/tmp"}}}`))
-
-	resp := readScannerMsg(t, sc)
 	if resp["error"] != nil {
-		t.Fatalf("warmup error: %v", resp["error"])
+		t.Fatalf("unexpected error: %v", resp["error"])
 	}
-
-	close(release)
-
-	notif := readScannerMsg(t, sc)
-	if notif["method"] != "notifications/claude/channel" {
-		t.Errorf("method=%v want notifications/claude/channel", notif["method"])
+	result, _ := resp["result"].(map[string]any)
+	if result["protocolVersion"] != mcpProtocolVersion {
+		t.Errorf("unexpected protocolVersion: %v", result["protocolVersion"])
 	}
-	if _, hasID := notif["id"]; hasID {
-		t.Errorf("notification must not carry an id field, got: %v", notif["id"])
+	info, _ := result["serverInfo"].(map[string]any)
+	if info["name"] != "depgraph" {
+		t.Errorf("serverInfo.name=%v want depgraph", info["name"])
 	}
-	params, _ := notif["params"].(map[string]any)
-	content, _ := params["content"].(string)
-	if !strings.Contains(content, "ready") || !strings.Contains(content, "/tmp") {
-		t.Errorf("content=%q want to mention ready+/tmp", content)
-	}
-	meta, _ := params["meta"].(map[string]any)
-	if meta["status"] != "ready" || meta["root"] != "/tmp" || meta["nodes"] != "2" {
-		t.Errorf("meta=%v want status=ready root=/tmp nodes=2", meta)
+	if instr, _ := result["instructions"].(string); instr == "" {
+		t.Errorf("expected non-empty instructions")
 	}
 }
 
-// failingAnalyzer returns the configured error from Analyze.
-type failingAnalyzer struct{ err error }
-
-func (f *failingAnalyzer) Analyze(_ context.Context, _ string) (domain.Graph, error) {
-	return domain.Graph{}, f.err
-}
-
-func TestServe_Warmup_NotifiesOnFailure(t *testing.T) {
-	stub := &failingAnalyzer{err: fmt.Errorf("analyzer exploded")}
-	a := New(
-		func(excludes []string) ports.AnalyzerPort { return stub },
-		func(root string) ports.EditorPort { return &stubEditor{} },
+func TestServe_ToolsList(t *testing.T) {
+	a := newTestAdapter(t)
+	resp := serveOne(t, a,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
 	)
-	inPR, inPW := io.Pipe()
-	outPR, outPW := io.Pipe()
-	a.in = inPR
-	a.out = outPW
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go a.Serve(ctx) //nolint:errcheck
-
-	sc := bufio.NewScanner(outPR)
-	sc.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
-	sc.Split(splitJSONLines)
-
-	fmt.Fprint(inPW, frame(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"warmup","arguments":{"root":"/tmp"}}}`))
-
-	_ = readScannerMsg(t, sc) // warmup ack
-
-	notif := readScannerMsg(t, sc)
-	params, _ := notif["params"].(map[string]any)
-	meta, _ := params["meta"].(map[string]any)
-	if meta["status"] != "failed" {
-		t.Errorf("status=%v want failed", meta["status"])
+	result, _ := resp["result"].(map[string]any)
+	tools, _ := result["tools"].([]any)
+	if len(tools) != 3 {
+		t.Errorf("expected 3 tools, got %d", len(tools))
 	}
-	if msg, _ := meta["error"].(string); !strings.Contains(msg, "analyzer exploded") {
-		t.Errorf("meta.error=%q want to contain 'analyzer exploded'", msg)
+	wantNames := map[string]bool{
+		"add_component":   false,
+		"find_symbols":    false,
+		"find_references": false,
 	}
-	content, _ := params["content"].(string)
-	if !strings.Contains(content, "analyzer exploded") {
-		t.Errorf("content=%q want error message inline", content)
+	for _, tool := range tools {
+		m, _ := tool.(map[string]any)
+		name, _ := m["name"].(string)
+		if _, ok := wantNames[name]; ok {
+			wantNames[name] = true
+		}
+	}
+	for name, found := range wantNames {
+		if !found {
+			t.Errorf("tool %q missing from tools/list", name)
+		}
 	}
 }
 
-func TestServe_Warmup_MultiRoot(t *testing.T) {
-	backendRelease := make(chan struct{})
-	frontendRelease := make(chan struct{})
-
-	backendStub := &blockingAnalyzer{
-		graph: domain.Graph{
-			Nodes: []domain.Node{{ID: "go-1", Kind: domain.NodeKindSymbol, Label: "GoHandler"}},
-		},
-		release: backendRelease,
-	}
-	frontendStub := &blockingAnalyzer{
-		graph: domain.Graph{
-			Nodes: []domain.Node{{ID: "ts-1", Kind: domain.NodeKindSymbol, Label: "TsComponent"}},
-		},
-		release: frontendRelease,
-	}
-
-	stubs := make(chan ports.AnalyzerPort, 2)
-	stubs <- backendStub
-	stubs <- frontendStub
-
-	a := New(
-		func(excludes []string) ports.AnalyzerPort { return <-stubs },
-		func(root string) ports.EditorPort { return &stubEditor{} },
+func TestServe_UnknownMethod(t *testing.T) {
+	a := newTestAdapter(t)
+	resp := serveOne(t, a,
+		`{"jsonrpc":"2.0","id":1,"method":"unknown/method","params":{}}`,
 	)
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error in response, got: %v", resp)
+	}
+	code, _ := errObj["code"].(float64)
+	if int(code) != -32601 {
+		t.Errorf("expected error code -32601, got %v", code)
+	}
+}
 
-	inPR, inPW := io.Pipe()
-	outPR, outPW := io.Pipe()
-	a.in = inPR
-	a.out = outPW
+func TestServe_AddComponent_MissingRoot(t *testing.T) {
+	a := newTestAdapter(t)
+	resp := serveOne(t, a,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_component","arguments":{}}}`,
+	)
+	if _, ok := resp["error"].(map[string]any); !ok {
+		t.Fatalf("expected error for missing root, got: %v", resp)
+	}
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	go a.Serve(ctx) //nolint:errcheck
+func TestServe_FindSymbols_ComponentNotRegistered(t *testing.T) {
+	a := newTestAdapter(t)
+	resp := serveOne(t, a,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp/missing","query":"foo"}}}`,
+	)
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error, got: %v", resp)
+	}
+	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "add_component") {
+		t.Errorf("expected message to mention add_component, got: %s", msg)
+	}
+}
 
-	msgID := 0
-	send := func(body string) map[string]any {
-		t.Helper()
-		fmt.Fprint(inPW, frame(body))
-		scanner := bufio.NewScanner(outPR)
-		scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
-		scanner.Split(splitJSONLines)
-		for scanner.Scan() {
-			var resp map[string]any
-			if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
-				continue
-			}
-			// Skip server-initiated notifications (e.g. warmup completion);
-			// callers want the response to their request.
-			if _, hasID := resp["id"]; !hasID {
-				continue
-			}
-			return resp
-		}
-		return nil
+func TestServe_FindReferences_DecodesSymbolID(t *testing.T) {
+	a := newTestAdapter(t)
+	// SymbolID is well-formed but the component is not registered, so we
+	// expect the "call add_component first" error path — proving the symbol
+	// ID is decoded successfully.
+	id := EncodeSymbolID(SymbolID{Lang: lsploader.Go, RelPath: "x.go", Line: 1, Char: 2, Name: "Foo"})
+	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_references","arguments":{"root":"/tmp/missing","symbol_id":%q}}}`, id)
+	resp := serveOne(t, a, body)
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error, got: %v", resp)
 	}
-	nextID := func() string {
-		msgID++
-		return fmt.Sprintf("%d", msgID)
+	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "add_component") {
+		t.Errorf("expected component-missing error, got: %s", msg)
 	}
+}
 
-	// warmup both roots
-	r1 := send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"warmup","arguments":{"root":"/tmp/backend"}}}`, nextID()))
-	if r1["error"] != nil {
-		t.Fatalf("backend warmup error: %v", r1["error"])
+func TestServe_FindReferences_InvalidSymbolID(t *testing.T) {
+	a := newTestAdapter(t)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_references","arguments":{"root":"/tmp","symbol_id":"not-valid"}}}`
+	resp := serveOne(t, a, body)
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error, got: %v", resp)
 	}
-	r2 := send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"warmup","arguments":{"root":"/tmp/frontend"}}}`, nextID()))
-	if r2["error"] != nil {
-		t.Fatalf("frontend warmup error: %v", r2["error"])
-	}
-
-	// both roots should still be warming up
-	findBackend := send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp/backend","query":""}}}`, nextID()))
-	if findBackend["error"] == nil {
-		t.Fatalf("expected retry error for backend while warming up, got: %v", findBackend)
-	}
-
-	// release backend only
-	close(backendRelease)
-
-	// poll until backend is ready
-	deadline := time.Now().Add(3 * time.Second)
-	var backendReady map[string]any
-	for time.Now().Before(deadline) {
-		backendReady = send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp/backend","query":""}}}`, nextID()))
-		if backendReady["error"] == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if backendReady["error"] != nil {
-		t.Fatalf("backend find_symbols still failing: %v", backendReady["error"])
-	}
-	backendText := backendReady["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	if !strings.Contains(backendText, "GoHandler") {
-		t.Errorf("expected GoHandler in backend result, got: %s", backendText)
-	}
-
-	// frontend should still be warming up (independent of backend)
-	frontendResp := send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp/frontend","query":""}}}`, nextID()))
-	if frontendResp["error"] == nil {
-		t.Fatalf("expected frontend to still be warming up, got result: %v", frontendResp)
-	}
-
-	// release frontend
-	close(frontendRelease)
-
-	// poll until frontend is ready
-	deadline = time.Now().Add(3 * time.Second)
-	var frontendReady map[string]any
-	for time.Now().Before(deadline) {
-		frontendReady = send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp/frontend","query":""}}}`, nextID()))
-		if frontendReady["error"] == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if frontendReady["error"] != nil {
-		t.Fatalf("frontend find_symbols still failing: %v", frontendReady["error"])
-	}
-	frontendText := frontendReady["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	if !strings.Contains(frontendText, "TsComponent") {
-		t.Errorf("expected TsComponent in frontend result, got: %s", frontendText)
-	}
-	if strings.Contains(frontendText, "GoHandler") {
-		t.Errorf("GoHandler should not appear in frontend result, got: %s", frontendText)
+	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "symbol_id") && !strings.Contains(msg, "invalid") {
+		t.Errorf("expected validation error, got: %s", msg)
 	}
 }
 
 // Type definitions used only at test time to validate the shape of tools.json.
-// Production code embeds tools.json as json.RawMessage and serves it verbatim.
 type toolProperty struct {
 	Type        string        `json:"type"`
 	Description string        `json:"description,omitempty"`
@@ -690,28 +277,170 @@ func TestToolsJSON(t *testing.T) {
 			t.Errorf("tool %q: inputSchema.type = %q, want %q", d.Name, d.InputSchema.Type, "object")
 		}
 	}
-	for _, want := range []string{"warmup", "find_references", "find_symbols"} {
+	for _, want := range []string{"add_component", "find_references", "find_symbols"} {
 		if !names[want] {
 			t.Errorf("tool %q not found in tools.json", want)
 		}
 	}
 }
 
-func TestServe_UnknownMethod(t *testing.T) {
-	inPR, inPW := io.Pipe()
-	outPR, outPW := io.Pipe()
-	a := newWithIO("/", domain.Graph{}, &stubEditor{}, inPR, outPW)
-
-	resp := serveOne(t, a, inPW, outPR,
-		`{"jsonrpc":"2.0","id":1,"method":"unknown/method","params":{}}`,
-	)
-
-	errObj, ok := resp["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error in response, got: %v", resp)
+func TestSymbolID_RoundTrip(t *testing.T) {
+	cases := []SymbolID{
+		{Lang: lsploader.Go, RelPath: "internal/foo.go", Line: 12, Char: 5, Name: "Foo"},
+		{Lang: lsploader.Rust, RelPath: "src/lib.rs", Line: 0, Char: 0, Name: "Trait::method"},
+		{Lang: lsploader.TypeScript, RelPath: "src/x:y.ts", Line: 99, Char: 200, Name: "name with space"},
 	}
-	code, _ := errObj["code"].(float64)
-	if int(code) != -32601 {
-		t.Errorf("expected error code -32601, got %v", code)
+	for _, want := range cases {
+		got, err := DecodeSymbolID(EncodeSymbolID(want))
+		if err != nil {
+			t.Fatalf("decode failed for %#v: %v", want, err)
+		}
+		if got != want {
+			t.Errorf("round-trip mismatch:\n  got  %#v\n  want %#v", got, want)
+		}
+	}
+}
+
+func TestSymbolID_DecodeRejectsMalformed(t *testing.T) {
+	bad := []string{"", "only-three:parts:1", "go:foo.go:not-a-line:0:Zm9v"}
+	for _, s := range bad {
+		if _, err := DecodeSymbolID(s); err == nil {
+			t.Errorf("expected error decoding %q, got nil", s)
+		}
+	}
+}
+
+func TestEmbeddedConfig_AllLanguagesPresent(t *testing.T) {
+	cfg, err := LoadEmbeddedConfig()
+	if err != nil {
+		t.Fatalf("LoadEmbeddedConfig: %v", err)
+	}
+	for _, lang := range lsploader.All() {
+		specs, err := cfg.LSPSpecsFor(lang)
+		if err != nil {
+			t.Errorf("LSPSpecsFor(%s): %v", lang, err)
+			continue
+		}
+		if len(specs) == 0 {
+			t.Errorf("language %s has no LSP servers configured", lang)
+		}
+		for _, spec := range specs {
+			if spec.Command == "" {
+				t.Errorf("language %s: LSP spec has empty Command: %#v", lang, spec)
+			}
+		}
+	}
+}
+
+func TestComponentState_InitiallyIndexing(t *testing.T) {
+	c := &Component{Root: "/tmp", sessions: make(map[lsploader.Language]*sessionEntry)}
+	c.sessions[lsploader.Go] = &sessionEntry{state: ComponentIndexing}
+	state, _ := c.State()
+	if state != ComponentIndexing {
+		t.Errorf("state=%s want indexing", state)
+	}
+}
+
+func TestComponentState_AllReady(t *testing.T) {
+	c := &Component{Root: "/tmp", sessions: make(map[lsploader.Language]*sessionEntry)}
+	c.sessions[lsploader.Go] = &sessionEntry{state: ComponentReady}
+	c.sessions[lsploader.TypeScript] = &sessionEntry{state: ComponentReady}
+	state, _ := c.State()
+	if state != ComponentReady {
+		t.Errorf("state=%s want ready", state)
+	}
+}
+
+func TestComponentState_OneFailedFailsAggregate(t *testing.T) {
+	c := &Component{Root: "/tmp", sessions: make(map[lsploader.Language]*sessionEntry)}
+	c.sessions[lsploader.Go] = &sessionEntry{state: ComponentReady}
+	c.sessions[lsploader.TypeScript] = &sessionEntry{state: ComponentFailed, err: fmt.Errorf("boom")}
+	state, err := c.State()
+	if state != ComponentFailed {
+		t.Errorf("state=%s want failed", state)
+	}
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("err=%v want to contain 'boom'", err)
+	}
+}
+
+func TestRangeContains(t *testing.T) {
+	r := LSPRange{
+		Start: LSPPosition{Line: 1, Character: 2},
+		End:   LSPPosition{Line: 3, Character: 4},
+	}
+	cases := []struct {
+		pos  LSPPosition
+		want bool
+	}{
+		{LSPPosition{Line: 1, Character: 2}, true},
+		{LSPPosition{Line: 1, Character: 1}, false},
+		{LSPPosition{Line: 2, Character: 0}, true},
+		{LSPPosition{Line: 3, Character: 3}, true},
+		{LSPPosition{Line: 3, Character: 4}, false}, // exclusive end
+		{LSPPosition{Line: 4, Character: 0}, false},
+	}
+	for _, c := range cases {
+		if got := rangeContains(r, c.pos); got != c.want {
+			t.Errorf("rangeContains(%v) = %v want %v", c.pos, got, c.want)
+		}
+	}
+}
+
+func TestFindInnermostSymbol(t *testing.T) {
+	outer := LSPDocumentSymbol{
+		Name:           "Outer",
+		Range:          LSPRange{Start: LSPPosition{Line: 0}, End: LSPPosition{Line: 100}},
+		SelectionRange: LSPRange{Start: LSPPosition{Line: 0, Character: 5}},
+		Children: []LSPDocumentSymbol{
+			{
+				Name:           "Inner",
+				Range:          LSPRange{Start: LSPPosition{Line: 10}, End: LSPPosition{Line: 20}},
+				SelectionRange: LSPRange{Start: LSPPosition{Line: 10, Character: 2}},
+			},
+		},
+	}
+	got := findInnermostSymbol([]LSPDocumentSymbol{outer}, LSPPosition{Line: 15})
+	if got == nil || got.Name != "Inner" {
+		t.Errorf("expected Inner, got %v", got)
+	}
+	got = findInnermostSymbol([]LSPDocumentSymbol{outer}, LSPPosition{Line: 50})
+	if got == nil || got.Name != "Outer" {
+		t.Errorf("expected Outer, got %v", got)
+	}
+	got = findInnermostSymbol([]LSPDocumentSymbol{outer}, LSPPosition{Line: 200})
+	if got != nil {
+		t.Errorf("expected nil, got %v", got)
+	}
+}
+
+func TestIsExcluded(t *testing.T) {
+	excludes := []string{"**/*_test.go", "vendor/**"}
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"foo_test.go", true},
+		{"a/b/foo_test.go", true},
+		{"vendor/x.go", true},
+		{"foo.go", false},
+		{"src/foo.ts", false},
+	}
+	for _, c := range cases {
+		got, err := isExcluded(c.path, excludes)
+		if err != nil {
+			t.Errorf("isExcluded(%q) returned err: %v", c.path, err)
+		}
+		if got != c.want {
+			t.Errorf("isExcluded(%q) = %v want %v", c.path, got, c.want)
+		}
+	}
+}
+
+func TestIsExcluded_InvalidPattern(t *testing.T) {
+	// doublestar.PathMatch returns ErrBadPattern for unbalanced brackets.
+	_, err := isExcluded("foo.go", []string{"foo[unbalanced"})
+	if err == nil {
+		t.Error("expected error for invalid glob pattern, got nil")
 	}
 }

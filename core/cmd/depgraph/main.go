@@ -15,7 +15,6 @@ import (
 	httpadapter "github.com/sundaycrafts/depgraph/internal/adapters/http"
 	lspadapter "github.com/sundaycrafts/depgraph/internal/adapters/lsp"
 	mcpadapter "github.com/sundaycrafts/depgraph/internal/adapters/mcp"
-	"github.com/sundaycrafts/depgraph/internal/cache"
 	"github.com/sundaycrafts/depgraph/internal/ports"
 	"github.com/sundaycrafts/depgraph/internal/version"
 )
@@ -36,37 +35,18 @@ func main() {
 
 	var server ports.ServerPort
 	if parsed.mcp {
-		server = mcpadapter.New(func(excludes []string) ports.AnalyzerPort {
-			var a ports.AnalyzerPort = lspadapter.New(
-				lspadapter.WithExcludeGlobs(excludes...),
-				lspadapter.WithLogger(slog.Default()),
-			)
-			opts := []cache.Option{
-				cache.WithVersion(version.Version),
-				cache.WithExcludes(excludes),
-				cache.WithLogger(slog.Default()),
-			}
-			if parsed.noCache {
-				opts = append(opts, cache.WithDisabled())
-			}
-			return cache.New(a, opts...)
-		}, func(root string) ports.EditorPort {
-			return fsadapter.New(root)
-		})
+		cfg, err := mcpadapter.LoadEmbeddedConfig()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "load embedded MCP config: %v\n", err)
+			os.Exit(1)
+		}
+		manager := mcpadapter.NewComponentManager(ctx, cfg, lspadapter.ExecLocator{}, slog.Default())
+		server = mcpadapter.New(manager, mcpadapter.NewNoopInitializer(), slog.Default())
 	} else {
-		var analyzer ports.AnalyzerPort = lspadapter.New(
+		analyzer := lspadapter.New(
 			lspadapter.WithExcludeGlobs(parsed.excludes...),
 			lspadapter.WithLogger(slog.Default()),
 		)
-		cacheOpts := []cache.Option{
-			cache.WithVersion(version.Version),
-			cache.WithExcludes(parsed.excludes),
-			cache.WithLogger(slog.Default()),
-		}
-		if parsed.noCache {
-			cacheOpts = append(cacheOpts, cache.WithDisabled())
-		}
-		analyzer = cache.New(analyzer, cacheOpts...)
 
 		editor := fsadapter.New(root)
 

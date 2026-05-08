@@ -1,0 +1,30 @@
+{
+  "languages": {
+    "Go": {
+      "language_servers": ["gopls"]
+    },
+    "Rust": {
+      "language_servers": ["rust-analyzer"]
+    },
+    "TypeScript": {
+      "language_servers": ["typescript-language-server"]
+    }
+  },
+  "lsp": {
+    "gopls": {
+      "command": "gopls",
+      "args": ["-mode=stdio"],
+      "initialization_options": {}
+    },
+    "rust-analyzer": {
+      "command": "rust-analyzer",
+      "args": [],
+      "initialization_options": {}
+    },
+    "typescript-language-server": {
+      "command": "typescript-language-server",
+      "args": ["--stdio"],
+      "initialization_options": {}
+    }
+  }
+}

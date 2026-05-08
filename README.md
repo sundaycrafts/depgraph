@@ -114,18 +114,18 @@ make dev TARGET_DIR=$PWD/core DEPGRAPH_ARGS='--exclude=**/*_test.go --exclude=ve
 depgraph can run as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) stdio server, letting AI assistants like Claude query the dependency graph directly.
 
 ```sh
-depgraph <target-dir> --mcp [--exclude <glob>]...
+depgraph --mcp
 ```
 
-The `--mcp` flag skips the HTTP server and browser. Analysis runs once at startup; the process then waits for JSON-RPC requests on stdin and writes responses to stdout.
+The `--mcp` flag skips the HTTP server and browser. depgraph then keeps a long-lived language server alive for every registered project root (called a *component*) and answers tool calls against the live LSP. If the directory you launched depgraph from contains a marker file (`go.mod`, `Cargo.toml`, `tsconfig.json`), that directory is registered automatically.
 
 ### Tools
 
 | Tool | Arguments | Description |
 |---|---|---|
-| `list_symbols` | — | List all symbols with their IDs, kinds, and file paths |
-| `find_references` | `symbol_id: string` | Recursively find all symbols that (transitively) reference the given symbol |
-| `read_file` | `path: string` | Read the contents of a source file |
+| `add_component` | `root: string`, `excludes?: string[]` | Register a project root and start its language servers. Returns immediately with `{"status":"indexing"}`; subsequent tool calls return a "retry shortly" error until indexing finishes. |
+| `find_symbols` | `root: string`, `query: string` | Walk every source file under the component, ask the language server for that file's symbols, and fuzzy-match their names against `query` (case-insensitive subsequence). Returns matching symbols with stateless `id`s usable in `find_references`. |
+| `find_references` | `root: string`, `symbol_id: string` | Walk the caller chain upstream from `symbol_id` using `textDocument/references`. Returns every symbol that transitively reaches the target. |
 
 ### Claude Code integration
 
@@ -136,7 +136,8 @@ Add to your `~/.claude/settings.json` (or `.claude/settings.json` for a project-
   "mcpServers": {
     "depgraph": {
       "command": "/path/to/depgraph",
-      "args": ["<target-dir>", "--mcp"]
+      "args": ["--mcp"],
+      "cwd": "<target-dir>"
     }
   }
 }
@@ -146,7 +147,16 @@ Then in Claude Code you can ask things like:
 
 > "Which functions transitively call `Analyze`?"
 
-Claude will call `list_symbols` to look up the ID, then `find_references` to walk the caller chain.
+Claude will call `find_symbols` to look up the ID, then `find_references` to walk the caller chain.
+
+---
+
+## Roadmap
+
+- **MCP-standard progress notifications** for component readiness (replacing the previous custom `notifications/claude/channel` events).
+- **Recursive component discovery** at session start: walk the project respecting `.gitignore` and auto-register every nested marker (`go.mod`, `Cargo.toml`, `tsconfig.json`, `package.json`, …).
+- **User-overridable LSP config**: layered on top of the built-in zed-style config (global and project-local).
+- **Incremental updates**: forward editor `didChange` to the live language server so reference queries reflect unsaved buffers.
 
 ---
 
