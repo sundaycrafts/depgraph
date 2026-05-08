@@ -1,4 +1,4 @@
-package mcp
+package lsp
 
 import (
 	_ "embed"
@@ -12,7 +12,7 @@ import (
 var configJSON []byte
 
 // Config mirrors the zed-style configuration file embedded in config.json.
-// Only the fields the MCP server currently consumes are decoded.
+// Only the fields the LSP session factory currently consumes are decoded.
 type Config struct {
 	Languages map[string]LanguageConfig `json:"languages"`
 	LSP       map[string]LSPConfig      `json:"lsp"`

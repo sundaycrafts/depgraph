@@ -12,10 +12,12 @@ import (
 	"time"
 
 	fsadapter "github.com/sundaycrafts/depgraph/internal/adapters/fs"
+	fswatchadapter "github.com/sundaycrafts/depgraph/internal/adapters/fswatch"
 	httpadapter "github.com/sundaycrafts/depgraph/internal/adapters/http"
 	lspadapter "github.com/sundaycrafts/depgraph/internal/adapters/lsp"
 	mcpadapter "github.com/sundaycrafts/depgraph/internal/adapters/mcp"
-	"github.com/sundaycrafts/depgraph/internal/ports"
+	"github.com/sundaycrafts/depgraph/internal/domain"
+	"github.com/sundaycrafts/depgraph/internal/lsploader"
 	"github.com/sundaycrafts/depgraph/internal/version"
 )
 
@@ -33,15 +35,22 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	var server ports.ServerPort
+	var server domain.PortServer
 	if parsed.mcp {
-		cfg, err := mcpadapter.LoadEmbeddedConfig()
+		cfg, err := lspadapter.LoadEmbeddedConfig()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "load embedded MCP config: %v\n", err)
+			fmt.Fprintf(os.Stderr, "load embedded LSP config: %v\n", err)
 			os.Exit(1)
 		}
-		manager := mcpadapter.NewComponentManager(ctx, cfg, lspadapter.ExecLocator{}, slog.Default())
-		server = mcpadapter.New(manager, mcpadapter.NewNoopInitializer(), slog.Default())
+		workspace := domain.NewWorkspace(
+			ctx,
+			lspadapter.NewSessionFactory(cfg, slog.Default()),
+			fswatchadapter.NewFactory(slog.Default()),
+			domain.PortLanguageDetectorFunc(lsploader.Detect),
+			lspadapter.ExecLocator{},
+			slog.Default(),
+		)
+		server = mcpadapter.New(workspace, mcpadapter.NewNoopInitializer(), slog.Default())
 	} else {
 		analyzer := lspadapter.New(
 			lspadapter.WithExcludeGlobs(parsed.excludes...),

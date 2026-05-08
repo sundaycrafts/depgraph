@@ -2,6 +2,13 @@
 
 depgraph follows a ports-and-adapters (hexagonal) architecture to keep the analysis core decoupled from any specific language server, file system, or UI delivery mechanism.
 
+> **Glossary note.** "Component" in C4 (used below) refers to a logical
+> module / division within a container. depgraph's domain layer uses the
+> term **Project** for a registered project root (the unit `add_project`
+> creates). When you see "component" in this document, it is the C4
+> meaning; when you see "project" it is the depgraph domain meaning.
+> See `_docs/domain.md` for the full domain vocabulary.
+
 ---
 
 ## C4 Model

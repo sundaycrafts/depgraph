@@ -6,16 +6,16 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sundaycrafts/depgraph/internal/ports"
+	"github.com/sundaycrafts/depgraph/internal/domain"
 )
 
-// Adapter implements ports.EditorPort via the local filesystem.
+// Adapter implements domain.PortEditor via the local filesystem.
 // Access is restricted to paths within the analyzed root to prevent path traversal.
 type Adapter struct {
 	root string
 }
 
-var _ ports.EditorPort = (*Adapter)(nil)
+var _ domain.PortEditor = (*Adapter)(nil)
 
 func New(root string) *Adapter {
 	abs, err := filepath.Abs(root)

@@ -18,13 +18,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/sundaycrafts/depgraph/internal/domain"
 	"github.com/sundaycrafts/depgraph/internal/lsploader"
-	"github.com/sundaycrafts/depgraph/internal/ports"
 )
 
 // progressInterval is how often (in files) Pass 1/2 emit a Debug progress log.
 const progressInterval = 100
 
-// Adapter implements ports.AnalyzerPort via the Language Server Protocol.
+// Adapter implements domain.PortAnalyzer via the Language Server Protocol.
 // It auto-detects supported languages in the target directory and dispatches
 // to the appropriate language server for each.
 type Adapter struct {
@@ -33,7 +32,7 @@ type Adapter struct {
 	logger   *slog.Logger
 }
 
-var _ ports.AnalyzerPort = (*Adapter)(nil)
+var _ domain.PortAnalyzer = (*Adapter)(nil)
 
 // Option configures the Adapter.
 type Option func(*Adapter)

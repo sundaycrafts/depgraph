@@ -1,7 +1,7 @@
 [
   {
-    "name": "add_component",
-    "description": "Register a project root as a component and start a long-lived language server for each detected language (Go, Rust, TypeScript). Returns immediately with {\"status\":\"indexing\"}; the LSP indexes in the background. find_symbols / find_references for that root return a \"retry shortly\" error until the component is ready. For mono-repo projects, call add_component once per subtree root. Pass the excludes field (doublestar globs relative to root) to omit non-production code from queries — e.g. excludes: [\"**/*.test.{ts,tsx}\", \"**/*.spec.{ts,tsx}\", \"**/*_test.go\"].",
+    "name": "add_project",
+    "description": "Register a project root with depgraph and start a long-lived language server for each detected language (Go, Rust, TypeScript). Returns immediately with {\"status\":\"indexing\"}; the LSP indexes in the background. find_symbols / find_references for that root return a \"retry shortly\" error until the project is ready. For mono-repo projects, call add_project once per subtree root. Pass the excludes field (doublestar globs relative to root) to omit non-production code from queries — e.g. excludes: [\"**/*.test.{ts,tsx}\", \"**/*.spec.{ts,tsx}\", \"**/*_test.go\"].",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -26,7 +26,7 @@
       "properties": {
         "root": {
           "type": "string",
-          "description": "Absolute path to the project root passed to add_component"
+          "description": "Absolute path to the project root passed to add_project"
         },
         "symbol_id": {
           "type": "string",
@@ -38,13 +38,13 @@
   },
   {
     "name": "find_symbols",
-    "description": "Search for symbols in a registered component by name. Walks every source file under the component root, asks each language server for that file's symbols, and fuzzy-matches their names against the query (case-insensitive subsequence). Returns {\"results\": [...symbols], \"warnings\"?: [\"...\"]}; each result carries a stateless id usable with find_references plus its name, kind, path (relative to root), and 0-based line/character. Presence of warnings means at least one file's lookup failed and the result list is partial. Cost scales with project size.",
+    "description": "Search for symbols in a registered project by name. Walk every source file under the project root, ask the language server for that file's symbols, and fuzzy-match their names against the query (case-insensitive subsequence). Returns {\"results\": [...symbols], \"warnings\"?: [\"...\"]}; each result carries a stateless id usable with find_references plus its name, kind, path (relative to root), and 0-based line/character. Presence of warnings means at least one file's lookup failed and the result list is partial. Cost scales with project size.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "root": {
           "type": "string",
-          "description": "Absolute path to the project root passed to add_component"
+          "description": "Absolute path to the project root passed to add_project"
         },
         "query": {
           "type": "string",

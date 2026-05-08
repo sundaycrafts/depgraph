@@ -16,7 +16,6 @@ import (
 	"github.com/sundaycrafts/depgraph/gen"
 	httpadapter "github.com/sundaycrafts/depgraph/internal/adapters/http"
 	"github.com/sundaycrafts/depgraph/internal/domain"
-	"github.com/sundaycrafts/depgraph/internal/ports"
 )
 
 // fixture creates a temp directory with two Go source files and returns its path.
@@ -61,7 +60,7 @@ func newTestServer(t *testing.T) (*httptest.Server, string) {
 	root := fixture(t)
 	graph := stubGraph(root)
 
-	fsEditor := ports.EditorFunc(func(path string) (string, error) {
+	fsEditor := domain.PortEditorFunc(func(path string) (string, error) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return "", err
@@ -252,7 +251,7 @@ func TestServer_GracefulShutdown(t *testing.T) {
 	root := fixture(t)
 	graph := stubGraph(root)
 
-	fsEditor := ports.EditorFunc(func(path string) (string, error) {
+	fsEditor := domain.PortEditorFunc(func(path string) (string, error) {
 		data, err := os.ReadFile(path)
 		return string(data), err
 	})

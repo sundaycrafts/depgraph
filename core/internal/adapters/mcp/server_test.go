@@ -11,16 +11,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sundaycrafts/depgraph/internal/domain"
 	"github.com/sundaycrafts/depgraph/internal/lsploader"
 )
 
-// frame wraps a JSON body in newline-delimited format (MCP 2025-11-25 stdio transport).
+// frame wraps a JSON body in newline-delimited format (MCP 2025-11-25
+// stdio transport).
 func frame(body string) string {
 	return body + "\n"
 }
 
 // fakeLocator implements lsploader.Locator. By default it claims every
-// binary is missing — sufficient for tests that never call add_component.
+// binary is missing — sufficient for tests that never call add_project.
 type fakeLocator struct {
 	available map[string]string
 }
@@ -32,17 +34,42 @@ func (f fakeLocator) LookupBinary(name string) (string, error) {
 	return "", fmt.Errorf("not found: %s", name)
 }
 
-func newTestAdapter(t *testing.T) *Adapter {
-	t.Helper()
-	cfg, err := LoadEmbeddedConfig()
-	if err != nil {
-		t.Fatalf("load embedded config: %v", err)
-	}
-	mgr := NewComponentManager(context.Background(), cfg, fakeLocator{}, slog.Default())
-	return New(mgr, NewNoopInitializer(), slog.Default())
+// nopSessionFactory satisfies domain.PortAnalysisSessionFactory but never
+// actually opens anything — Open is unreachable in dispatch tests because
+// no test in this file calls add_project for a directory with marker files.
+type nopSessionFactory struct{}
+
+func (nopSessionFactory) Open(_ context.Context, _ lsploader.Language, _ string, _ []string, _ <-chan domain.SourceChange) (domain.PortAnalysisSession, error) {
+	return nil, fmt.Errorf("nopSessionFactory: Open not implemented")
 }
 
-// serveOne runs the adapter, sends one request, reads one response, then cancels.
+// nopWatcherFactory satisfies domain.PortSourceWatcherFactory.
+type nopWatcherFactory struct{}
+
+func (nopWatcherFactory) Watch(_ string, _ []string) (domain.PortSourceWatcher, error) {
+	return nil, fmt.Errorf("nopWatcherFactory: Watch not implemented")
+}
+
+// nopDetector satisfies domain.PortLanguageDetector.
+type nopDetector struct{}
+
+func (nopDetector) Detect(_ string) ([]lsploader.Language, error) { return nil, nil }
+
+func newTestAdapter(t *testing.T) *Adapter {
+	t.Helper()
+	ws := domain.NewWorkspace(
+		context.Background(),
+		nopSessionFactory{},
+		nopWatcherFactory{},
+		nopDetector{},
+		fakeLocator{},
+		slog.Default(),
+	)
+	return New(ws, NewNoopInitializer(), slog.Default())
+}
+
+// serveOne runs the adapter, sends one request, reads one response, then
+// cancels.
 func serveOne(t *testing.T, a *Adapter, reqBody string) map[string]any {
 	t.Helper()
 	inPR, inPW := io.Pipe()
@@ -100,28 +127,6 @@ func TestSplitJSONLines_Partial(t *testing.T) {
 	}
 }
 
-func TestFuzzyMatch(t *testing.T) {
-	cases := []struct {
-		query, target string
-		want          bool
-	}{
-		{"add", "add", true},
-		{"ad", "add", true},
-		{"ADD", "add", true},
-		{"add", "ADD", true},
-		{"", "anything", true},
-		{"", "", true},
-		{"abc", "aXbXc", true},
-		{"zzz", "add", false},
-		{"addd", "add", false},
-	}
-	for _, tc := range cases {
-		if got := fuzzyMatch(tc.query, tc.target); got != tc.want {
-			t.Errorf("fuzzyMatch(%q, %q) = %v, want %v", tc.query, tc.target, got, tc.want)
-		}
-	}
-}
-
 func TestServe_Initialize(t *testing.T) {
 	a := newTestAdapter(t)
 	resp := serveOne(t, a,
@@ -154,7 +159,7 @@ func TestServe_ToolsList(t *testing.T) {
 		t.Errorf("expected 3 tools, got %d", len(tools))
 	}
 	wantNames := map[string]bool{
-		"add_component":   false,
+		"add_project":     false,
 		"find_symbols":    false,
 		"find_references": false,
 	}
@@ -187,17 +192,17 @@ func TestServe_UnknownMethod(t *testing.T) {
 	}
 }
 
-func TestServe_AddComponent_MissingRoot(t *testing.T) {
+func TestServe_AddProject_MissingRoot(t *testing.T) {
 	a := newTestAdapter(t)
 	resp := serveOne(t, a,
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_component","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_project","arguments":{}}}`,
 	)
 	if _, ok := resp["error"].(map[string]any); !ok {
 		t.Fatalf("expected error for missing root, got: %v", resp)
 	}
 }
 
-func TestServe_FindSymbols_ComponentNotRegistered(t *testing.T) {
+func TestServe_FindSymbols_ProjectNotRegistered(t *testing.T) {
 	a := newTestAdapter(t)
 	resp := serveOne(t, a,
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_symbols","arguments":{"root":"/tmp/missing","query":"foo"}}}`,
@@ -206,25 +211,25 @@ func TestServe_FindSymbols_ComponentNotRegistered(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected error, got: %v", resp)
 	}
-	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "add_component") {
-		t.Errorf("expected message to mention add_component, got: %s", msg)
+	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "add_project") {
+		t.Errorf("expected message to mention add_project, got: %s", msg)
 	}
 }
 
 func TestServe_FindReferences_DecodesSymbolID(t *testing.T) {
 	a := newTestAdapter(t)
-	// SymbolID is well-formed but the component is not registered, so we
-	// expect the "call add_component first" error path — proving the symbol
-	// ID is decoded successfully.
-	id := EncodeSymbolID(SymbolID{Lang: lsploader.Go, RelPath: "x.go", Line: 1, Char: 2, Name: "Foo"})
+	// SymbolID is well-formed but the project is not registered, so we
+	// expect the "call add_project first" error path — proving the
+	// symbol ID is decoded successfully.
+	id := domain.EncodeSymbolID(domain.SymbolID{Lang: lsploader.Go, RelPath: "x.go", Line: 1, Char: 2, Name: "Foo"})
 	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_references","arguments":{"root":"/tmp/missing","symbol_id":%q}}}`, id)
 	resp := serveOne(t, a, body)
 	errObj, ok := resp["error"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected error, got: %v", resp)
 	}
-	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "add_component") {
-		t.Errorf("expected component-missing error, got: %s", msg)
+	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "add_project") {
+		t.Errorf("expected project-missing error, got: %s", msg)
 	}
 }
 
@@ -277,170 +282,9 @@ func TestToolsJSON(t *testing.T) {
 			t.Errorf("tool %q: inputSchema.type = %q, want %q", d.Name, d.InputSchema.Type, "object")
 		}
 	}
-	for _, want := range []string{"add_component", "find_references", "find_symbols"} {
+	for _, want := range []string{"add_project", "find_references", "find_symbols"} {
 		if !names[want] {
 			t.Errorf("tool %q not found in tools.json", want)
 		}
-	}
-}
-
-func TestSymbolID_RoundTrip(t *testing.T) {
-	cases := []SymbolID{
-		{Lang: lsploader.Go, RelPath: "internal/foo.go", Line: 12, Char: 5, Name: "Foo"},
-		{Lang: lsploader.Rust, RelPath: "src/lib.rs", Line: 0, Char: 0, Name: "Trait::method"},
-		{Lang: lsploader.TypeScript, RelPath: "src/x:y.ts", Line: 99, Char: 200, Name: "name with space"},
-	}
-	for _, want := range cases {
-		got, err := DecodeSymbolID(EncodeSymbolID(want))
-		if err != nil {
-			t.Fatalf("decode failed for %#v: %v", want, err)
-		}
-		if got != want {
-			t.Errorf("round-trip mismatch:\n  got  %#v\n  want %#v", got, want)
-		}
-	}
-}
-
-func TestSymbolID_DecodeRejectsMalformed(t *testing.T) {
-	bad := []string{"", "only-three:parts:1", "go:foo.go:not-a-line:0:Zm9v"}
-	for _, s := range bad {
-		if _, err := DecodeSymbolID(s); err == nil {
-			t.Errorf("expected error decoding %q, got nil", s)
-		}
-	}
-}
-
-func TestEmbeddedConfig_AllLanguagesPresent(t *testing.T) {
-	cfg, err := LoadEmbeddedConfig()
-	if err != nil {
-		t.Fatalf("LoadEmbeddedConfig: %v", err)
-	}
-	for _, lang := range lsploader.All() {
-		specs, err := cfg.LSPSpecsFor(lang)
-		if err != nil {
-			t.Errorf("LSPSpecsFor(%s): %v", lang, err)
-			continue
-		}
-		if len(specs) == 0 {
-			t.Errorf("language %s has no LSP servers configured", lang)
-		}
-		for _, spec := range specs {
-			if spec.Command == "" {
-				t.Errorf("language %s: LSP spec has empty Command: %#v", lang, spec)
-			}
-		}
-	}
-}
-
-func TestComponentState_InitiallyIndexing(t *testing.T) {
-	c := &Component{Root: "/tmp", sessions: make(map[lsploader.Language]*sessionEntry)}
-	c.sessions[lsploader.Go] = &sessionEntry{state: ComponentIndexing}
-	state, _ := c.State()
-	if state != ComponentIndexing {
-		t.Errorf("state=%s want indexing", state)
-	}
-}
-
-func TestComponentState_AllReady(t *testing.T) {
-	c := &Component{Root: "/tmp", sessions: make(map[lsploader.Language]*sessionEntry)}
-	c.sessions[lsploader.Go] = &sessionEntry{state: ComponentReady}
-	c.sessions[lsploader.TypeScript] = &sessionEntry{state: ComponentReady}
-	state, _ := c.State()
-	if state != ComponentReady {
-		t.Errorf("state=%s want ready", state)
-	}
-}
-
-func TestComponentState_OneFailedFailsAggregate(t *testing.T) {
-	c := &Component{Root: "/tmp", sessions: make(map[lsploader.Language]*sessionEntry)}
-	c.sessions[lsploader.Go] = &sessionEntry{state: ComponentReady}
-	c.sessions[lsploader.TypeScript] = &sessionEntry{state: ComponentFailed, err: fmt.Errorf("boom")}
-	state, err := c.State()
-	if state != ComponentFailed {
-		t.Errorf("state=%s want failed", state)
-	}
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Errorf("err=%v want to contain 'boom'", err)
-	}
-}
-
-func TestRangeContains(t *testing.T) {
-	r := LSPRange{
-		Start: LSPPosition{Line: 1, Character: 2},
-		End:   LSPPosition{Line: 3, Character: 4},
-	}
-	cases := []struct {
-		pos  LSPPosition
-		want bool
-	}{
-		{LSPPosition{Line: 1, Character: 2}, true},
-		{LSPPosition{Line: 1, Character: 1}, false},
-		{LSPPosition{Line: 2, Character: 0}, true},
-		{LSPPosition{Line: 3, Character: 3}, true},
-		{LSPPosition{Line: 3, Character: 4}, false}, // exclusive end
-		{LSPPosition{Line: 4, Character: 0}, false},
-	}
-	for _, c := range cases {
-		if got := rangeContains(r, c.pos); got != c.want {
-			t.Errorf("rangeContains(%v) = %v want %v", c.pos, got, c.want)
-		}
-	}
-}
-
-func TestFindInnermostSymbol(t *testing.T) {
-	outer := LSPDocumentSymbol{
-		Name:           "Outer",
-		Range:          LSPRange{Start: LSPPosition{Line: 0}, End: LSPPosition{Line: 100}},
-		SelectionRange: LSPRange{Start: LSPPosition{Line: 0, Character: 5}},
-		Children: []LSPDocumentSymbol{
-			{
-				Name:           "Inner",
-				Range:          LSPRange{Start: LSPPosition{Line: 10}, End: LSPPosition{Line: 20}},
-				SelectionRange: LSPRange{Start: LSPPosition{Line: 10, Character: 2}},
-			},
-		},
-	}
-	got := findInnermostSymbol([]LSPDocumentSymbol{outer}, LSPPosition{Line: 15})
-	if got == nil || got.Name != "Inner" {
-		t.Errorf("expected Inner, got %v", got)
-	}
-	got = findInnermostSymbol([]LSPDocumentSymbol{outer}, LSPPosition{Line: 50})
-	if got == nil || got.Name != "Outer" {
-		t.Errorf("expected Outer, got %v", got)
-	}
-	got = findInnermostSymbol([]LSPDocumentSymbol{outer}, LSPPosition{Line: 200})
-	if got != nil {
-		t.Errorf("expected nil, got %v", got)
-	}
-}
-
-func TestIsExcluded(t *testing.T) {
-	excludes := []string{"**/*_test.go", "vendor/**"}
-	cases := []struct {
-		path string
-		want bool
-	}{
-		{"foo_test.go", true},
-		{"a/b/foo_test.go", true},
-		{"vendor/x.go", true},
-		{"foo.go", false},
-		{"src/foo.ts", false},
-	}
-	for _, c := range cases {
-		got, err := isExcluded(c.path, excludes)
-		if err != nil {
-			t.Errorf("isExcluded(%q) returned err: %v", c.path, err)
-		}
-		if got != c.want {
-			t.Errorf("isExcluded(%q) = %v want %v", c.path, got, c.want)
-		}
-	}
-}
-
-func TestIsExcluded_InvalidPattern(t *testing.T) {
-	// doublestar.PathMatch returns ErrBadPattern for unbalanced brackets.
-	_, err := isExcluded("foo.go", []string{"foo[unbalanced"})
-	if err == nil {
-		t.Error("expected error for invalid glob pattern, got nil")
 	}
 }
