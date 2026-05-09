@@ -185,6 +185,16 @@ func (p *Project) FindReferences(ctx context.Context, target SymbolID) (PartialR
 		return PartialResult[Symbol]{}, err
 	}
 
+	// Combine the language's default excludes (vendor/, target/,
+	// node_modules/, …) with the user's. Without this the BFS would
+	// happily recurse into upstream library code — a single import of a
+	// large npm package could fan out into thousands of opaque symbols
+	// the user cannot edit.
+	meta := lsploader.Meta(sess.Lang())
+	allExcludes := make([]string, 0, len(meta.DefaultExcludes)+len(p.Excludes))
+	allExcludes = append(allExcludes, meta.DefaultExcludes...)
+	allExcludes = append(allExcludes, p.Excludes...)
+
 	type queueItem struct {
 		uri  string
 		line int
@@ -234,7 +244,7 @@ func (p *Project) FindReferences(ctx context.Context, target SymbolID) (PartialR
 			if !ok {
 				continue
 			}
-			excluded, exErr := IsExcluded(rel, p.Excludes)
+			excluded, exErr := IsExcluded(rel, allExcludes)
 			if exErr != nil {
 				addWarning("invalid exclude pattern (skipping filter): %v", exErr)
 			}

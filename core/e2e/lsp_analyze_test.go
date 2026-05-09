@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,11 +27,16 @@ func TestMain(m *testing.M) {
 }
 
 // TestAnalyze_TypeScript verifies that the LSP adapter correctly identifies
-// symbols and references in a two-file TypeScript project:
+// symbols and references in the ts-project fixture:
 //   - greeter.ts exports greet()
 //   - index.ts imports and calls greet() inside main()
+//   - both index.ts and validator.ts depend on z.string() from node_modules/zod
 //
-// Expected: graph contains a "greet" symbol and a "references" edge pointing to it.
+// Expected:
+//   - graph contains a "greet" symbol and a "references" edge pointing to it
+//   - graph contains nothing from node_modules — depgraph must not recurse
+//     into upstream library code that the user cannot modify, even when
+//     several files reach the same external symbol
 func TestAnalyze_TypeScript(t *testing.T) {
 	root, err := filepath.Abs("testdata/ts-project")
 	if err != nil {
@@ -51,6 +57,23 @@ func TestAnalyze_TypeScript(t *testing.T) {
 	}
 	if !hasReferenceTo(graph, greet.ID) {
 		t.Errorf("expected a 'references' edge pointing to 'greet', found none")
+	}
+
+	// node_modules must never participate in the dependency chain. Library
+	// types (zod's ZodString, etc.) are user-unmodifiable and would balloon
+	// the graph; depgraph treats them as opaque leaves.
+	for _, n := range graph.Nodes {
+		if strings.Contains(n.Path, "node_modules") {
+			t.Errorf("graph leaked node_modules node: %s (path=%s, kind=%s)", n.Label, n.Path, n.Kind)
+		}
+	}
+
+	// Sanity: both user files that touch zod should still be present.
+	if findFileNode(graph, "index.ts") == nil {
+		t.Error("expected index.ts file node in graph")
+	}
+	if findFileNode(graph, "validator.ts") == nil {
+		t.Error("expected validator.ts file node in graph")
 	}
 }
 
@@ -85,6 +108,16 @@ func TestAnalyze_Rust(t *testing.T) {
 func findSymbol(g domain.Graph, label string) *domain.Node {
 	for i, n := range g.Nodes {
 		if n.Kind == domain.NodeKindSymbol && n.Label == label {
+			return &g.Nodes[i]
+		}
+	}
+	return nil
+}
+
+// findFileNode returns the file node whose Label exactly matches name, or nil.
+func findFileNode(g domain.Graph, name string) *domain.Node {
+	for i, n := range g.Nodes {
+		if n.Kind == domain.NodeKindFile && n.Label == name {
 			return &g.Nodes[i]
 		}
 	}
