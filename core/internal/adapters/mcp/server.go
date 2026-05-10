@@ -12,6 +12,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/sundaycrafts/depgraph/internal/config"
 	"github.com/sundaycrafts/depgraph/internal/domain"
 	"github.com/sundaycrafts/depgraph/internal/lsploader"
 	"github.com/sundaycrafts/depgraph/internal/version"
@@ -57,6 +58,22 @@ type initializeResult struct {
 	Capabilities    serverCapabilities `json:"capabilities"`
 	ServerInfo      serverInfo         `json:"serverInfo"`
 	Instructions    string             `json:"instructions,omitempty"`
+	Warnings        []string           `json:"warnings,omitempty"`
+	// Projects is the canonical list of roots the agent can pass to
+	// find_symbols / find_references. Populated post-registration so
+	// config-loaded, legacy-auto-added, and any pre-existing roots all
+	// appear. Without this the agent has no discovery path: error
+	// messages and tool schemas alone are circular ("the root passed
+	// to add_project").
+	Projects []projectInfo `json:"projects,omitempty"`
+}
+
+// projectInfo is the agent-visible projection of a registered Project.
+// Languages helps the agent reason about which symbol kinds to expect
+// without an extra round-trip.
+type projectInfo struct {
+	Root      string   `json:"root"`
+	Languages []string `json:"languages"`
 }
 
 type serverCapabilities struct {
@@ -90,15 +107,37 @@ type Adapter struct {
 	initializer ProjectInitializer
 	logger      *slog.Logger
 
+	// configCWD is the directory depgraph.yaml is loaded from. Captured
+	// at startup so reload_config reads the same file even if some tool
+	// later changes the process working directory.
+	configCWD string
+	// cfgMu guards startupCfg / startupWarn — both are replaced wholesale
+	// by reload_config from a separate goroutine relative to initialize.
+	cfgMu       sync.Mutex
+	startupCfg  *config.Config
+	startupWarn []string
+
 	in     io.Reader
 	out    io.Writer
 	sendMu sync.Mutex // serialises writes to out
 }
 
-// New builds an Adapter wired to workspace and initializer. The Adapter
-// takes ownership of workspace: Workspace.Shutdown is invoked from Serve
-// before returning.
-func New(workspace *domain.Workspace, initializer ProjectInitializer, logger *slog.Logger) *Adapter {
+// New builds an Adapter wired to workspace and initializer. cfg and
+// warnings come from config.Load on the launch directory; the Adapter
+// uses them during the initialize handshake and re-uses configCWD for
+// reload_config. cfg may be nil (no depgraph.yaml found) in which case
+// initialize falls back to the legacy CWD marker-file auto-add.
+//
+// The Adapter takes ownership of workspace: Workspace.Shutdown is
+// invoked from Serve before returning.
+func New(
+	workspace *domain.Workspace,
+	initializer ProjectInitializer,
+	cfg *config.Config,
+	warnings []string,
+	configCWD string,
+	logger *slog.Logger,
+) *Adapter {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -106,6 +145,9 @@ func New(workspace *domain.Workspace, initializer ProjectInitializer, logger *sl
 		workspace:   workspace,
 		initializer: initializer,
 		logger:      logger,
+		startupCfg:  cfg,
+		startupWarn: append([]string(nil), warnings...),
+		configCWD:   configCWD,
 		in:          os.Stdin,
 		out:         os.Stdout,
 	}
@@ -164,14 +206,22 @@ func (a *Adapter) Serve(ctx context.Context) error {
 func (a *Adapter) dispatch(ctx context.Context, msg rpcMsg) (mcpResult, *rpcErr) {
 	switch msg.Method {
 	case "initialize":
-		a.handleInitializeAutoProject(ctx)
+		warnings := a.handleInitializeProjects(ctx)
 		return initializeResult{
 			ProtocolVersion: mcpProtocolVersion,
 			ServerInfo:      serverInfo{Name: "depgraph", Version: version.Version},
-			Instructions: "Each project root registered with depgraph is a 'project'. Call add_project for any " +
-				"extra root you need; if depgraph was launched in a directory containing a supported marker file " +
-				"(go.mod, Cargo.toml, tsconfig.json) that directory is registered automatically. Projects index " +
-				"asynchronously: find_symbols and find_references return a 'retry shortly' error until indexing finishes.",
+			Instructions: "Each project root registered with depgraph is a 'project'. The set of " +
+				"currently registered roots is returned in this response's `projects` field — pass " +
+				"one of those exact paths to find_symbols / find_references. depgraph reads " +
+				"depgraph.yaml from the launch directory at startup; every entry there is registered " +
+				"automatically. Without a config file, a project is auto-registered if the launch " +
+				"directory contains a supported marker file (go.mod, Cargo.toml, tsconfig.json). " +
+				"Call add_project for any extra root not in the file, and reload_config after editing " +
+				"depgraph.yaml to pick up newly added entries (its response also returns the updated " +
+				"projects list). Projects index asynchronously: find_symbols and find_references " +
+				"return a 'retry shortly' error until indexing finishes.",
+			Warnings: warnings,
+			Projects: a.registeredProjects(),
 		}, nil
 
 	case "tools/list":
@@ -185,36 +235,77 @@ func (a *Adapter) dispatch(ctx context.Context, msg rpcMsg) (mcpResult, *rpcErr)
 	}
 }
 
-// handleInitializeAutoProject registers the depgraph process's working
-// directory as a project when it carries a recognised marker file.
-// Errors are logged but never bubble up — failure to auto-register is a
-// soft fallback (the agent can still call add_project manually).
-func (a *Adapter) handleInitializeAutoProject(ctx context.Context) {
+// handleInitializeProjects registers projects at startup. When a parsed
+// depgraph.yaml is available, every entry in it is registered. Otherwise
+// the legacy CWD marker-file fallback runs so users without a config
+// file still get auto-registration. Returns warnings to attach to the
+// initialize response — config-load issues plus per-project AddProject
+// errors.
+func (a *Adapter) handleInitializeProjects(ctx context.Context) []string {
+	a.cfgMu.Lock()
+	cfg := a.startupCfg
+	warn := append([]string(nil), a.startupWarn...)
+	a.cfgMu.Unlock()
+
+	if cfg != nil {
+		warn = append(warn, a.applyConfig(cfg)...)
+		return warn
+	}
+	warn = append(warn, a.legacyCWDAutoAdd(ctx)...)
+	return warn
+}
+
+// applyConfig registers each project listed in cfg. Returns one warning
+// string per AddProject failure; success is silent. Used by initialize
+// and reload_config.
+func (a *Adapter) applyConfig(cfg *config.Config) []string {
+	var warnings []string
+	for _, p := range cfg.Projects {
+		if _, err := a.workspace.AddProject(p.Root, p.Excludes, p.ExcludeSymbols); err != nil {
+			warnings = append(warnings, fmt.Sprintf("add_project %q: %v", p.Root, err))
+			a.logger.Warn("config add_project failed", "root", p.Root, "err", err)
+			continue
+		}
+		a.logger.Info("registered project from config",
+			"root", p.Root,
+			"excludes", len(p.Excludes),
+			"exclude_symbols", len(p.ExcludeSymbols))
+	}
+	return warnings
+}
+
+// legacyCWDAutoAdd is the pre-config-file behaviour: register the launch
+// directory if it carries a recognised marker file. Kept so users
+// without a depgraph.yaml are not forced to write one. Errors are
+// surfaced as warnings but never abort the handshake.
+func (a *Adapter) legacyCWDAutoAdd(ctx context.Context) []string {
 	cwd, err := os.Getwd()
 	if err != nil {
 		a.logger.Warn("auto-add: getwd failed; agent must call add_project manually", "err", err)
-		return
+		return []string{fmt.Sprintf("auto-add: getwd failed: %v", err)}
 	}
 	langs, err := lsploader.Detect(cwd)
 	if err != nil {
 		a.logger.Warn("auto-add: language detection failed", "cwd", cwd, "err", err)
-		return
+		return []string{fmt.Sprintf("auto-add: detect %q: %v", cwd, err)}
 	}
 	if len(langs) == 0 {
 		a.logger.Info("auto-add: no marker files in cwd; agent must call add_project manually", "cwd", cwd)
-		return
+		return nil
 	}
 	if _, err := a.workspace.AddProject(cwd, nil, nil); err != nil {
 		a.logger.Warn("auto-add project failed", "cwd", cwd, "err", err)
-		return
+		return []string{fmt.Sprintf("auto-add %q: %v", cwd, err)}
 	}
 	a.logger.Info("auto-registered project from cwd", "cwd", cwd, "langs", langs)
 
 	if a.initializer != nil {
 		if err := a.initializer.Initialize(ctx, cwd, langs, a.workspace); err != nil {
 			a.logger.Warn("project initializer failed", "err", err)
+			return []string{fmt.Sprintf("initializer: %v", err)}
 		}
 	}
+	return nil
 }
 
 type toolCallParams struct {
@@ -234,9 +325,40 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (mcpR
 		return a.handleFindSymbols(ctx, p.Arguments)
 	case "find_references":
 		return a.handleFindReferences(ctx, p.Arguments)
+	case "reload_config":
+		return a.handleReloadConfig()
 	default:
 		return nil, &rpcErr{Code: -32602, Message: "unknown tool: " + p.Name}
 	}
+}
+
+// handleReloadConfig re-reads depgraph.yaml from the launch directory
+// and registers any newly listed projects via Workspace.AddProject.
+// Existing projects are no-ops on duplicate root, so this call is
+// idempotent — but their excludes / exclude_symbols are NOT updated;
+// restart the server to pick up edits to an already-registered project.
+func (a *Adapter) handleReloadConfig() (mcpResult, *rpcErr) {
+	cfg, loadWarn := config.Load(a.configCWD)
+	a.cfgMu.Lock()
+	a.startupCfg = cfg
+	a.startupWarn = append([]string(nil), loadWarn...)
+	a.cfgMu.Unlock()
+
+	warnings := append([]string(nil), loadWarn...)
+	if cfg != nil {
+		warnings = append(warnings, a.applyConfig(cfg)...)
+	}
+
+	payload := struct {
+		Status   string        `json:"status"`
+		Warnings []string      `json:"warnings,omitempty"`
+		Projects []projectInfo `json:"projects,omitempty"`
+	}{
+		Status:   "reloaded",
+		Warnings: warnings,
+		Projects: a.registeredProjects(),
+	}
+	return marshalToolResult(payload)
 }
 
 func (a *Adapter) handleAddProject(raw json.RawMessage) (mcpResult, *rpcErr) {
@@ -310,15 +432,39 @@ func (a *Adapter) handleFindReferences(ctx context.Context, raw json.RawMessage)
 	return marshalToolResult(payload)
 }
 
-// lookupProject resolves root and returns the matching Project. Returns a
-// JSON-RPC error if no project is registered for that root — the agent
-// must call add_project first.
+// lookupProject resolves root and returns the matching Project. On miss
+// the error message lists every currently-registered root so the agent
+// can self-correct without a separate discovery round-trip.
 func (a *Adapter) lookupProject(root string) (*domain.Project, *rpcErr) {
 	project := a.workspace.Get(root)
-	if project == nil {
-		return nil, &rpcErr{Code: -32603, Message: "call add_project first for root: " + root}
+	if project != nil {
+		return project, nil
 	}
-	return project, nil
+	msg := "call add_project first for root: " + root
+	if list := a.workspace.List(); len(list) > 0 {
+		roots := make([]string, len(list))
+		for i, p := range list {
+			roots[i] = p.Root
+		}
+		msg += fmt.Sprintf(" (registered: %v)", roots)
+	}
+	return nil, &rpcErr{Code: -32603, Message: msg}
+}
+
+// registeredProjects projects every entry in workspace.List() into the
+// agent-visible projectInfo shape. Empty list when nothing is
+// registered (returned as `projects: []` is suppressed by omitempty).
+func (a *Adapter) registeredProjects() []projectInfo {
+	list := a.workspace.List()
+	out := make([]projectInfo, 0, len(list))
+	for _, p := range list {
+		langs := make([]string, len(p.Languages))
+		for i, l := range p.Languages {
+			langs[i] = string(l)
+		}
+		out = append(out, projectInfo{Root: p.Root, Languages: langs})
+	}
+	return out
 }
 
 // marshalToolResult JSON-encodes payload and wraps it in the toolCallResult

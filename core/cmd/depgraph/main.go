@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
@@ -16,6 +17,7 @@ import (
 	httpadapter "github.com/sundaycrafts/depgraph/internal/adapters/http"
 	lspadapter "github.com/sundaycrafts/depgraph/internal/adapters/lsp"
 	mcpadapter "github.com/sundaycrafts/depgraph/internal/adapters/mcp"
+	"github.com/sundaycrafts/depgraph/internal/config"
 	"github.com/sundaycrafts/depgraph/internal/domain"
 	"github.com/sundaycrafts/depgraph/internal/lsploader"
 	"github.com/sundaycrafts/depgraph/internal/version"
@@ -35,6 +37,16 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "getwd: %v\n", err)
+		os.Exit(1)
+	}
+	userCfg, cfgWarnings := config.Load(cwd)
+	for _, w := range cfgWarnings {
+		slog.Warn("config", "msg", w)
+	}
+
 	var server domain.PortServer
 	if parsed.mcp {
 		cfg, err := lspadapter.LoadEmbeddedConfig()
@@ -50,11 +62,20 @@ func main() {
 			lspadapter.ExecLocator{},
 			slog.Default(),
 		)
-		server = mcpadapter.New(workspace, mcpadapter.NewNoopInitializer(), slog.Default())
+		server = mcpadapter.New(workspace, mcpadapter.NewNoopInitializer(), userCfg, cfgWarnings, cwd, slog.Default())
 	} else {
+		// Merge config-file entry for the CLI target (if any) into the
+		// CLI-supplied excludes / exclude_symbols. CLI flags append to
+		// the config entry's lists rather than replacing them.
+		mergedExcludes := append([]string{}, parsed.excludes...)
+		mergedExcludeSymbols := append([]string{}, parsed.excludeSymbols...)
+		if entry := matchingProject(userCfg, root); entry != nil {
+			mergedExcludes = append(append([]string{}, entry.Excludes...), mergedExcludes...)
+			mergedExcludeSymbols = append(append([]string{}, entry.ExcludeSymbols...), mergedExcludeSymbols...)
+		}
 		analyzer := lspadapter.New(
-			lspadapter.WithExcludeGlobs(parsed.excludes...),
-			lspadapter.WithExcludeSymbols(parsed.excludeSymbols...),
+			lspadapter.WithExcludeGlobs(mergedExcludes...),
+			lspadapter.WithExcludeSymbols(mergedExcludeSymbols...),
 			lspadapter.WithLogger(slog.Default()),
 		)
 
@@ -95,6 +116,26 @@ func modeName(mcp bool) string {
 		return "mcp"
 	}
 	return "http"
+}
+
+// matchingProject returns the config entry whose Root resolves to the
+// same absolute path as cliRoot, or nil if no entry matches. Used so a
+// CLI invocation against a directory listed in depgraph.yaml inherits
+// that entry's excludes / exclude_symbols.
+func matchingProject(cfg *config.Config, cliRoot string) *config.Project {
+	if cfg == nil || cliRoot == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(cliRoot)
+	if err != nil {
+		return nil
+	}
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Root == abs {
+			return &cfg.Projects[i]
+		}
+	}
+	return nil
 }
 
 func openBrowser(url string) {

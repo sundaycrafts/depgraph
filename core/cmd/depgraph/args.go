@@ -34,8 +34,8 @@ func parseArgs() cliArgs {
 	var excludes, excludeSymbols stringSlice
 	var mcpMode bool
 	var verbose bool
-	flag.Var(&excludes, "exclude", "glob pattern relative to <target-dir> to exclude (repeatable)")
-	flag.Var(&excludeSymbols, "exclude-symbol", "symbol exclude spec `[kind:]pattern` (doublestar glob; repeatable; ignored under --mcp)")
+	flag.Var(&excludes, "exclude", "glob pattern relative to <target-dir> to exclude (repeatable; appended to the matching depgraph.yaml entry if any; ignored under --mcp)")
+	flag.Var(&excludeSymbols, "exclude-symbol", "symbol exclude spec `[kind:]pattern` (doublestar glob; repeatable; appended to the matching depgraph.yaml entry if any; ignored under --mcp)")
 	flag.BoolVar(&mcpMode, "mcp", false, "run as MCP stdio server instead of HTTP server")
 	flag.BoolVar(&verbose, "verbose", false, "enable verbose (debug-level) logging")
 	flag.Usage = func() {

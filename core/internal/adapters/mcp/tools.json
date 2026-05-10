@@ -31,7 +31,7 @@
       "properties": {
         "root": {
           "type": "string",
-          "description": "Absolute path to the project root passed to add_project"
+          "description": "Absolute path to a registered project root. Use one of the paths returned in initialize.projects (or reload_config.projects) — these are the canonical roots auto-loaded from depgraph.yaml or registered via add_project."
         },
         "symbol_id": {
           "type": "string",
@@ -49,7 +49,7 @@
       "properties": {
         "root": {
           "type": "string",
-          "description": "Absolute path to the project root passed to add_project"
+          "description": "Absolute path to a registered project root. Use one of the paths returned in initialize.projects (or reload_config.projects) — these are the canonical roots auto-loaded from depgraph.yaml or registered via add_project."
         },
         "query": {
           "type": "string",
@@ -57,6 +57,14 @@
         }
       },
       "required": ["root", "query"]
+    }
+  },
+  {
+    "name": "reload_config",
+    "description": "Re-read depgraph.yaml from the launch directory and register any newly listed projects via the same path used at initialize. Existing projects are no-ops on duplicate root — restart the server to apply edits to an already-registered project. Returns {\"status\":\"reloaded\", \"warnings\"?: [\"...\"]}. Warnings include YAML parse failures, dropped invalid entries, and per-project AddProject errors.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
     }
   }
 ]
