@@ -88,11 +88,15 @@ func (w *Workspace) List() []*Project {
 // observable immediately; per-language sessions transition Indexing →
 // Ready/Failed in the background.
 //
+// excludeSymbols are `[kind:]pattern` specs (see SymbolExclude) used to
+// skip individual symbols during BFS — e.g. Next.js convention methods
+// that would otherwise fan out across every page.
+//
 // Re-adding an already-registered root is a no-op (returns the existing
 // Project). Filesystem-watcher creation failures cause AddProject to
 // fail outright — running with a stale view would silently return out-
 // of-date results to callers.
-func (w *Workspace) AddProject(root string, excludes []string) (*Project, error) {
+func (w *Workspace) AddProject(root string, excludes, excludeSymbols []string) (*Project, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve root: %w", err)
@@ -131,7 +135,7 @@ func (w *Workspace) AddProject(root string, excludes []string) (*Project, error)
 		return nil, fmt.Errorf("start file watcher: %w", err)
 	}
 
-	project := newProject(abs, excludes, langs, watcher, w.logger.With("root", abs))
+	project := newProject(abs, excludes, excludeSymbols, langs, watcher, w.logger.With("root", abs))
 	w.projects[abs] = project
 	w.mu.Unlock()
 

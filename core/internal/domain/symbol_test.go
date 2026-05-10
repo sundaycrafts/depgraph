@@ -104,6 +104,81 @@ func TestInnermostSymbol(t *testing.T) {
 	}
 }
 
+func TestParseSymbolExclude(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    SymbolExclude
+		wantErr bool
+	}{
+		{in: "getStaticProps", want: SymbolExclude{Pattern: "getStaticProps"}},
+		{in: "getStatic*", want: SymbolExclude{Pattern: "getStatic*"}},
+		{in: "function:getServerSideProps", want: SymbolExclude{Kind: "function", Pattern: "getServerSideProps"}},
+		{in: "method:render", want: SymbolExclude{Kind: "method", Pattern: "render"}},
+		{in: "", wantErr: true},
+		{in: "function:", wantErr: true},
+		{in: "bogus:foo", wantErr: true},
+	}
+	for _, tc := range cases {
+		got, err := ParseSymbolExclude(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("ParseSymbolExclude(%q) = %+v, want error", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseSymbolExclude(%q) unexpected error: %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("ParseSymbolExclude(%q) = %+v, want %+v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestIsSymbolExcluded(t *testing.T) {
+	specs := []string{"getStaticProps", "function:getServerSideProps", "method:render*"}
+
+	cases := []struct {
+		name string
+		kind SymbolKind
+		want bool
+	}{
+		// Any-kind exact match.
+		{"getStaticProps", "function", true},
+		{"getStaticProps", "variable", true},
+		// Function-kind constraint excludes other kinds.
+		{"getServerSideProps", "function", true},
+		{"getServerSideProps", "variable", false},
+		// Method-kind glob.
+		{"render", "method", true},
+		{"renderAsync", "method", true},
+		{"renderAsync", "function", false},
+		// Non-matches.
+		{"getStaticPaths", "function", false},
+		{"unrelated", "method", false},
+	}
+	for _, c := range cases {
+		got, err := IsSymbolExcluded(c.name, c.kind, specs)
+		if err != nil {
+			t.Errorf("IsSymbolExcluded(%q, %q): unexpected error %v", c.name, c.kind, err)
+		}
+		if got != c.want {
+			t.Errorf("IsSymbolExcluded(%q, %q) = %v, want %v", c.name, c.kind, got, c.want)
+		}
+	}
+
+	// Malformed spec returns an error but does not block matches in
+	// later specs from succeeding.
+	got, err := IsSymbolExcluded("getStaticProps", "function", []string{"bogus:foo", "getStaticProps"})
+	if err == nil {
+		t.Errorf("expected parse error for malformed spec, got nil")
+	}
+	if !got {
+		t.Errorf("expected match against the second spec despite the first being malformed")
+	}
+}
+
 func TestFlattenDocumentSymbols(t *testing.T) {
 	tree := []DocumentSymbol{
 		{Name: "A", Children: []DocumentSymbol{

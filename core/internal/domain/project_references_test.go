@@ -117,6 +117,92 @@ func TestFindReferences_SkipsNodeModules(t *testing.T) {
 	}
 }
 
+// TestFindReferences_SkipsExcludedSymbol asserts that a caller whose
+// name+kind matches an ExcludeSymbols spec is dropped from the BFS:
+// the user's regular caller still surfaces, while the excluded
+// `getStaticProps` does not appear in results and is never queued for
+// further expansion.
+//
+// This is the in-domain fix for Next.js convention methods that the TS
+// LSP otherwise reports as cross-page references, fanning out the
+// graph.
+func TestFindReferences_SkipsExcludedSymbol(t *testing.T) {
+	root := "/proj"
+	startFile := filepath.Join(root, "src", "lib", "shared.ts")
+	startURI := FileURIFromPath(startFile)
+	pageFile := filepath.Join(root, "src", "pages", "page.ts")
+	pageURI := FileURIFromPath(pageFile)
+	otherFile := filepath.Join(root, "src", "lib", "consumer.ts")
+	otherURI := FileURIFromPath(otherFile)
+
+	target := SymbolID{
+		Lang:    lsploader.TypeScript,
+		RelPath: "src/lib/shared.ts",
+		Line:    1,
+		Char:    14,
+		Name:    "sharedThing",
+	}
+
+	fake := &fakeSession{
+		lang: lsploader.TypeScript,
+		references: map[string][]ReferenceLocation{
+			// Two callers: a getStaticProps inside a Next.js page (must
+			// be filtered) and a regular function in another file (must
+			// be kept).
+			startURI: {
+				{URI: pageURI, Range: Range{Start: Position{Line: 5, Character: 4}, End: Position{Line: 5, Character: 18}}},
+				{URI: otherURI, Range: Range{Start: Position{Line: 9, Character: 2}, End: Position{Line: 9, Character: 10}}},
+			},
+		},
+		docs: map[string][]DocumentSymbol{
+			pageURI: {
+				{
+					Name:           "getStaticProps",
+					Kind:           "function",
+					Range:          Range{Start: Position{Line: 4}, End: Position{Line: 8}},
+					SelectionRange: Range{Start: Position{Line: 4, Character: 16}},
+				},
+			},
+			otherURI: {
+				{
+					Name:           "consumer",
+					Kind:           "function",
+					Range:          Range{Start: Position{Line: 8}, End: Position{Line: 12}},
+					SelectionRange: Range{Start: Position{Line: 8, Character: 9}},
+				},
+			},
+		},
+	}
+
+	project := projectWithReadySession(t, root, lsploader.TypeScript, fake)
+	project.ExcludeSymbols = []string{"function:getStaticProps"}
+
+	got, err := project.FindReferences(context.Background(), target)
+	if err != nil {
+		t.Fatalf("FindReferences: %v", err)
+	}
+
+	if len(got.Results) != 1 {
+		t.Fatalf("expected exactly one caller (consumer), got %d: %+v", len(got.Results), got.Results)
+	}
+	if got.Results[0].Name != "consumer" {
+		t.Errorf("first result Name=%q, want %q", got.Results[0].Name, "consumer")
+	}
+	for _, s := range got.Results {
+		if s.Name == "getStaticProps" {
+			t.Errorf("excluded symbol leaked into results: %+v", s)
+		}
+	}
+
+	// The BFS must never have followed into the excluded caller —
+	// pageURI should not appear in the recorded call log.
+	for _, called := range fake.calls {
+		if called == pageURI {
+			t.Errorf("BFS issued a References call against the excluded symbol's URI: %v", fake.calls)
+		}
+	}
+}
+
 // projectWithReadySession constructs a Project whose single language
 // session is in IndexReady, holding the supplied PortAnalysisSession.
 // Used only by tests that exercise the BFS without real LSP startup.

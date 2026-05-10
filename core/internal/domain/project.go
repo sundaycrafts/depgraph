@@ -26,9 +26,10 @@ const (
 // root, and exposes the high-level query methods (FindSymbols,
 // FindReferences) the agent-facing tools rely on.
 type Project struct {
-	Root      string
-	Excludes  []string
-	Languages []lsploader.Language
+	Root           string
+	Excludes       []string
+	ExcludeSymbols []string
+	Languages      []lsploader.Language
 
 	watcher PortSourceWatcher
 	logger  *slog.Logger
@@ -46,14 +47,15 @@ type sessionEntry struct {
 }
 
 // newProject constructs an empty Project; populated by Workspace.
-func newProject(root string, excludes []string, langs []lsploader.Language, watcher PortSourceWatcher, logger *slog.Logger) *Project {
+func newProject(root string, excludes, excludeSymbols []string, langs []lsploader.Language, watcher PortSourceWatcher, logger *slog.Logger) *Project {
 	p := &Project{
-		Root:      root,
-		Excludes:  append([]string(nil), excludes...),
-		Languages: append([]lsploader.Language(nil), langs...),
-		watcher:   watcher,
-		logger:    logger,
-		sessions:  make(map[lsploader.Language]*sessionEntry),
+		Root:           root,
+		Excludes:       append([]string(nil), excludes...),
+		ExcludeSymbols: append([]string(nil), excludeSymbols...),
+		Languages:      append([]lsploader.Language(nil), langs...),
+		watcher:        watcher,
+		logger:         logger,
+		sessions:       make(map[lsploader.Language]*sessionEntry),
 	}
 	for _, lang := range langs {
 		p.sessions[lang] = &sessionEntry{state: IndexIndexing}
@@ -253,6 +255,13 @@ func (p *Project) FindReferences(ctx context.Context, target SymbolID) (PartialR
 			}
 			caller := InnermostSymbol(getDoc(loc.URI), loc.Range.Start)
 			if caller == nil {
+				continue
+			}
+			symExcluded, symErr := IsSymbolExcluded(caller.Name, caller.Kind, p.ExcludeSymbols)
+			if symErr != nil {
+				addWarning("invalid exclude_symbol pattern (skipping filter): %v", symErr)
+			}
+			if symExcluded {
 				continue
 			}
 			id := EncodeSymbolID(SymbolID{

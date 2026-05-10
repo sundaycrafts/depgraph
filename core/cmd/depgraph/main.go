@@ -54,6 +54,7 @@ func main() {
 	} else {
 		analyzer := lspadapter.New(
 			lspadapter.WithExcludeGlobs(parsed.excludes...),
+			lspadapter.WithExcludeSymbols(parsed.excludeSymbols...),
 			lspadapter.WithLogger(slog.Default()),
 		)
 

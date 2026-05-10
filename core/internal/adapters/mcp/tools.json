@@ -1,7 +1,7 @@
 [
   {
     "name": "add_project",
-    "description": "Register a project root with depgraph and start a long-lived language server for each detected language (Go, Rust, TypeScript). Returns immediately with {\"status\":\"indexing\"}; the LSP indexes in the background. find_symbols / find_references for that root return a \"retry shortly\" error until the project is ready. For mono-repo projects, call add_project once per subtree root. Pass the excludes field (doublestar globs relative to root) to omit non-production code from queries — e.g. excludes: [\"**/*.test.{ts,tsx}\", \"**/*.spec.{ts,tsx}\", \"**/*_test.go\"].",
+    "description": "Register a project root with depgraph and start a long-lived language server for each detected language (Go, Rust, TypeScript). Returns immediately with {\"status\":\"indexing\"}; the LSP indexes in the background. find_symbols / find_references for that root return a \"retry shortly\" error until the project is ready. For mono-repo projects, call add_project once per subtree root. Pass the excludes field (doublestar globs relative to root) to omit non-production code from queries — e.g. excludes: [\"**/*.test.{ts,tsx}\", \"**/*.spec.{ts,tsx}\", \"**/*_test.go\"]. Pass exclude_symbols to drop framework-convention symbols whose cross-file references would otherwise fan out the graph (e.g. Next.js page-level getStaticProps / getServerSideProps).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -13,6 +13,11 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Doublestar glob patterns relative to root to exclude from queries (e.g. [\"**/*_test.go\", \"node_modules/**\"])"
+        },
+        "exclude_symbols": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Specs of the form `[kind:]pattern` matched against symbol name (doublestar glob). Excluded symbols are skipped during find_references BFS so they cannot fan out the graph. kind is optional and constrains the match to one LSP symbol kind (function, method, class, property, variable, ...). Examples: [\"getStaticProps\", \"getServerSideProps\", \"function:getStaticPaths\"]."
         }
       },
       "required": ["root"]

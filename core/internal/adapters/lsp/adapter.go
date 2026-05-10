@@ -27,9 +27,10 @@ const progressInterval = 100
 // It auto-detects supported languages in the target directory and dispatches
 // to the appropriate language server for each.
 type Adapter struct {
-	locator  lsploader.Locator
-	excludes []string
-	logger   *slog.Logger
+	locator        lsploader.Locator
+	excludes       []string
+	excludeSymbols []string
+	logger         *slog.Logger
 }
 
 var _ domain.PortAnalyzer = (*Adapter)(nil)
@@ -46,6 +47,14 @@ func WithLocator(loc lsploader.Locator) Option {
 // analysis root) that exclude files and directories from the walk.
 func WithExcludeGlobs(globs ...string) Option {
 	return func(a *Adapter) { a.excludes = append(a.excludes, globs...) }
+}
+
+// WithExcludeSymbols sets `[kind:]pattern` specs that suppress matching
+// symbols at Pass 1 — they never become graph nodes, so Pass 2 cannot
+// draw edges through them. Used to keep framework-convention symbols
+// (Next.js page-level getStaticProps etc.) from fanning out the graph.
+func WithExcludeSymbols(specs ...string) Option {
+	return func(a *Adapter) { a.excludeSymbols = append(a.excludeSymbols, specs...) }
 }
 
 // WithLogger sets the logger used for analysis progress messages.
@@ -232,6 +241,9 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 		}
 		key := canonPath(file)
 		for _, sym := range syms {
+			if a.shouldExcludeSymbol(sym, logger) {
+				continue
+			}
 			symID := gb.addSymbolNode(sym.Name, file, sym.Range, sym.Kind)
 			gb.addEdge(fileID, symID, domain.EdgeKindDefines, domain.ConfidenceExact)
 			fileSymbols[key] = append(fileSymbols[key], symEntry{id: symID, sym: sym})
@@ -343,6 +355,20 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 type symEntry struct {
 	id  string
 	sym DocumentSymbol
+}
+
+// shouldExcludeSymbol reports whether sym matches any of the adapter's
+// exclude_symbol specs. Malformed specs are logged once per call and
+// treated as non-matching; they don't abort the analysis.
+func (a *Adapter) shouldExcludeSymbol(sym DocumentSymbol, logger *slog.Logger) bool {
+	if len(a.excludeSymbols) == 0 {
+		return false
+	}
+	excluded, err := domain.IsSymbolExcluded(sym.Name, domain.SymbolKindFromLSP(int(sym.Kind)), a.excludeSymbols)
+	if err != nil {
+		logger.Warn("invalid exclude_symbol pattern (skipping filter)", "err", err)
+	}
+	return excluded
 }
 
 // containsPos reports whether Range r contains Position p.

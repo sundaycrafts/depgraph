@@ -16,10 +16,11 @@ func (s *stringSlice) String() string     { return strings.Join(*s, ",") }
 func (s *stringSlice) Set(v string) error { *s = append(*s, v); return nil }
 
 type cliArgs struct {
-	root     string
-	excludes []string
-	mcp      bool
-	verbose  bool
+	root           string
+	excludes       []string
+	excludeSymbols []string
+	mcp            bool
+	verbose        bool
 }
 
 func parseArgs() cliArgs {
@@ -30,14 +31,15 @@ func parseArgs() cliArgs {
 		os.Exit(0)
 	}
 
-	var excludes stringSlice
+	var excludes, excludeSymbols stringSlice
 	var mcpMode bool
 	var verbose bool
 	flag.Var(&excludes, "exclude", "glob pattern relative to <target-dir> to exclude (repeatable)")
+	flag.Var(&excludeSymbols, "exclude-symbol", "symbol exclude spec `[kind:]pattern` (doublestar glob; repeatable; ignored under --mcp)")
 	flag.BoolVar(&mcpMode, "mcp", false, "run as MCP stdio server instead of HTTP server")
 	flag.BoolVar(&verbose, "verbose", false, "enable verbose (debug-level) logging")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: depgraph <target-dir> [--exclude=<glob>]... [--mcp] [--verbose]")
+		fmt.Fprintln(os.Stderr, "usage: depgraph <target-dir> [--exclude=<glob>]... [--exclude-symbol=<[kind:]pattern>]... [--mcp] [--verbose]")
 		fmt.Fprintln(os.Stderr, "       depgraph version")
 		flag.PrintDefaults()
 	}
@@ -69,9 +71,10 @@ func parseArgs() cliArgs {
 	}
 
 	return cliArgs{
-		root:     root,
-		excludes: excludes,
-		mcp:      mcpMode,
-		verbose:  verbose,
+		root:           root,
+		excludes:       excludes,
+		excludeSymbols: excludeSymbols,
+		mcp:            mcpMode,
+		verbose:        verbose,
 	}
 }

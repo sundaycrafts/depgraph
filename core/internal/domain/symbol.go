@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/sundaycrafts/depgraph/internal/lsploader"
 )
 
@@ -113,6 +114,80 @@ func RangeContains(r Range, pos Position) bool {
 		return false
 	}
 	return true
+}
+
+// SymbolExclude is a parsed `[kind:]pattern` spec used to skip
+// individual symbols during graph construction or BFS traversal — e.g.
+// to keep Next.js convention methods like `getStaticProps` from
+// fanning out into every page-to-page edge.
+type SymbolExclude struct {
+	Kind    SymbolKind // empty ⇒ any kind matches
+	Pattern string     // doublestar glob against Symbol.Name
+}
+
+// ParseSymbolExclude parses a `[kind:]pattern` spec. The first colon
+// separates an optional kind prefix from the name pattern; LSP symbol
+// names never contain a colon legally, so the split is unambiguous.
+// Empty patterns and unknown kinds are rejected.
+func ParseSymbolExclude(s string) (SymbolExclude, error) {
+	if s == "" {
+		return SymbolExclude{}, fmt.Errorf("empty exclude_symbol spec")
+	}
+	if i := strings.IndexByte(s, ':'); i >= 0 {
+		kind, pattern := s[:i], s[i+1:]
+		if pattern == "" {
+			return SymbolExclude{}, fmt.Errorf("exclude_symbol spec %q: empty pattern", s)
+		}
+		if !knownSymbolKind(kind) {
+			return SymbolExclude{}, fmt.Errorf("exclude_symbol spec %q: unknown kind %q", s, kind)
+		}
+		return SymbolExclude{Kind: SymbolKind(kind), Pattern: pattern}, nil
+	}
+	return SymbolExclude{Pattern: s}, nil
+}
+
+// IsSymbolExcluded reports whether (name, kind) matches any spec in
+// specs. Mirrors IsExcluded for file paths: malformed specs surface as
+// the returned error so callers can warn-and-continue rather than
+// abort. A match short-circuits and returns (true, firstErrSeenSoFar).
+func IsSymbolExcluded(name string, kind SymbolKind, specs []string) (bool, error) {
+	var firstErr error
+	for _, raw := range specs {
+		spec, err := ParseSymbolExclude(raw)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if spec.Kind != "" && spec.Kind != kind {
+			continue
+		}
+		ok, err := doublestar.Match(spec.Pattern, name)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("pattern %q: %w", spec.Pattern, err)
+			}
+			continue
+		}
+		if ok {
+			return true, firstErr
+		}
+	}
+	return false, firstErr
+}
+
+// knownSymbolKind reports whether s is one of the canonical kind
+// strings produced by SymbolKindFromLSP. Used to reject typos in
+// exclude_symbol specs at parse time.
+func knownSymbolKind(s string) bool {
+	switch SymbolKind(s) {
+	case "file", "module", "namespace", "package", "class", "method",
+		"property", "field", "constructor", "enum", "interface",
+		"function", "variable", "constant", "struct", "typeParameter":
+		return true
+	}
+	return false
 }
 
 // FuzzyMatch reports whether all runes of query appear in target in order

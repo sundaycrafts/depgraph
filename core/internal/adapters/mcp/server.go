@@ -204,7 +204,7 @@ func (a *Adapter) handleInitializeAutoProject(ctx context.Context) {
 		a.logger.Info("auto-add: no marker files in cwd; agent must call add_project manually", "cwd", cwd)
 		return
 	}
-	if _, err := a.workspace.AddProject(cwd, nil); err != nil {
+	if _, err := a.workspace.AddProject(cwd, nil, nil); err != nil {
 		a.logger.Warn("auto-add project failed", "cwd", cwd, "err", err)
 		return
 	}
@@ -241,8 +241,9 @@ func (a *Adapter) handleToolCall(ctx context.Context, raw json.RawMessage) (mcpR
 
 func (a *Adapter) handleAddProject(raw json.RawMessage) (mcpResult, *rpcErr) {
 	var args struct {
-		Root     string   `json:"root"`
-		Excludes []string `json:"excludes"`
+		Root           string   `json:"root"`
+		Excludes       []string `json:"excludes"`
+		ExcludeSymbols []string `json:"exclude_symbols"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, &rpcErr{Code: -32602, Message: "invalid arguments: " + err.Error()}
@@ -250,7 +251,7 @@ func (a *Adapter) handleAddProject(raw json.RawMessage) (mcpResult, *rpcErr) {
 	if args.Root == "" {
 		return nil, &rpcErr{Code: -32602, Message: "root required"}
 	}
-	if _, err := a.workspace.AddProject(args.Root, args.Excludes); err != nil {
+	if _, err := a.workspace.AddProject(args.Root, args.Excludes, args.ExcludeSymbols); err != nil {
 		return nil, &rpcErr{Code: -32603, Message: err.Error()}
 	}
 	return toolCallResult{
