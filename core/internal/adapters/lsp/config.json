@@ -8,6 +8,9 @@
     },
     "TypeScript": {
       "language_servers": ["typescript-language-server"]
+    },
+    "Python": {
+      "language_servers": ["pyright-langserver"]
     }
   },
   "lsp": {
@@ -23,6 +26,11 @@
     },
     "typescript-language-server": {
       "command": "typescript-language-server",
+      "args": ["--stdio"],
+      "initialization_options": {}
+    },
+    "pyright-langserver": {
+      "command": "pyright-langserver",
       "args": ["--stdio"],
       "initialization_options": {}
     }

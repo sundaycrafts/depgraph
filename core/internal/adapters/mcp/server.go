@@ -215,7 +215,8 @@ func (a *Adapter) dispatch(ctx context.Context, msg rpcMsg) (mcpResult, *rpcErr)
 				"one of those exact paths to find_symbols / find_references. depgraph reads " +
 				"depgraph.yaml from the launch directory at startup; every entry there is registered " +
 				"automatically. Without a config file, a project is auto-registered if the launch " +
-				"directory contains a supported marker file (go.mod, Cargo.toml, tsconfig.json). " +
+				"directory contains a supported marker file (go.mod, Cargo.toml, tsconfig.json, " +
+				"pyproject.toml, setup.py, requirements.txt). " +
 				"Call add_project for any extra root not in the file, and reload_config after editing " +
 				"depgraph.yaml to pick up newly added entries (its response also returns the updated " +
 				"projects list). Projects index asynchronously: find_symbols and find_references " +

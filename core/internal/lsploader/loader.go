@@ -14,7 +14,8 @@ type Locator interface {
 }
 
 // Detect returns the languages present in root by checking for language-specific
-// marker files (go.mod, Cargo.toml, tsconfig.json) directly at the root level.
+// marker files (go.mod, Cargo.toml, tsconfig.json, pyproject.toml, etc.)
+// directly at the root level.
 // Results are returned in canonical language order.
 func Detect(root string) ([]Language, error) {
 	var found []Language

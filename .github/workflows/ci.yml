@@ -22,6 +22,8 @@ jobs:
         run: npm install -g typescript-language-server typescript
       - name: Install rust-analyzer
         run: rustup component add rust-analyzer
+      - name: Install pyright
+        run: npm install -g pyright
       - run: go vet ./...
         working-directory: core
       - run: go test -timeout 7m ./...

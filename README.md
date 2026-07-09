@@ -33,8 +33,9 @@ curl -L -o depgraph https://github.com/sundaycrafts/depgraph/releases/latest/dow
   | Go         | gopls                      | `go install golang.org/x/tools/gopls@latest`          |
   | Rust       | rust-analyzer              | `rustup component add rust-analyzer`                  |
   | TypeScript | typescript-language-server | `npm install -g typescript-language-server typescript` |
+  | Python     | pyright                    | `npm install -g pyright`                              |
 
-  Language detection is automatic — the target directory is scanned for `go.mod`, `Cargo.toml`, or `tsconfig.json`.
+  Language detection is automatic — the target directory is scanned for `go.mod`, `Cargo.toml`, `tsconfig.json`, `pyproject.toml`, `setup.py`, or `requirements.txt`.
 
 ---
 
@@ -117,7 +118,7 @@ depgraph can run as an [MCP (Model Context Protocol)](https://modelcontextprotoc
 depgraph --mcp
 ```
 
-The `--mcp` flag skips the HTTP server and browser. depgraph then keeps a long-lived language server alive for every registered project root (called a *project*) and answers tool calls against the live LSP. If the directory you launched depgraph from contains a marker file (`go.mod`, `Cargo.toml`, `tsconfig.json`), that directory is registered automatically.
+The `--mcp` flag skips the HTTP server and browser. depgraph then keeps a long-lived language server alive for every registered project root (called a *project*) and answers tool calls against the live LSP. If the directory you launched depgraph from contains a marker file (`go.mod`, `Cargo.toml`, `tsconfig.json`, `pyproject.toml`, `setup.py`, `requirements.txt`), that directory is registered automatically.
 
 ### Tools
 
@@ -154,7 +155,7 @@ Claude will call `find_symbols` to look up the ID, then `find_references` to wal
 ## Roadmap
 
 - **MCP-standard progress notifications** for project readiness (replacing the previous custom `notifications/claude/channel` events).
-- **Recursive project discovery** at session start: walk the workspace respecting `.gitignore` and auto-register every nested marker (`go.mod`, `Cargo.toml`, `tsconfig.json`, `package.json`, …).
+- **Recursive project discovery** at session start: walk the workspace respecting `.gitignore` and auto-register every nested marker (`go.mod`, `Cargo.toml`, `tsconfig.json`, `pyproject.toml`, `package.json`, …).
 - **User-overridable LSP config**: layered on top of the built-in zed-style config (global and project-local).
 
 ---

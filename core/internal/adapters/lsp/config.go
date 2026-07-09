@@ -43,6 +43,7 @@ var languageNames = map[lsploader.Language]string{
 	lsploader.Go:         "Go",
 	lsploader.Rust:       "Rust",
 	lsploader.TypeScript: "TypeScript",
+	lsploader.Python:     "Python",
 }
 
 // LSPSpecsFor returns the LSPConfig entries that should be launched for the

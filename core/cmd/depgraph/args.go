@@ -62,7 +62,8 @@ func parseArgs() cliArgs {
 	if mcpMode {
 		// MCP mode: the agent registers components at runtime via add_component;
 		// any positional argument is ignored. The CWD is auto-registered if it
-		// contains a supported marker file (go.mod, Cargo.toml, tsconfig.json).
+		// contains a supported marker file (go.mod, Cargo.toml, tsconfig.json,
+		// pyproject.toml, setup.py, requirements.txt).
 	} else if len(args) < 1 {
 		flag.Usage()
 		os.Exit(1)

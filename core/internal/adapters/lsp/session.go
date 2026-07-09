@@ -39,8 +39,9 @@ type liveSession struct {
 	// because every didOpen / didChange / didClose mutates both.
 	docMu sync.Mutex
 	// openedURIs records URIs currently in the LSP's open set. Populated
-	// during preload (TypeScript only) and on incoming Create / Modify
-	// events from the file watcher; entries removed on didClose.
+	// during preload (PreloadFiles languages only) and on incoming
+	// Create / Modify events from the file watcher; entries removed on
+	// didClose.
 	openedURIs map[string]bool
 	// versions tracks the textDocument version we last sent the LSP for
 	// each URI. didOpen sets it to 1; didChange increments before send.
@@ -148,10 +149,10 @@ func startLiveSession(
 		versions:   make(map[string]int64),
 	}
 
-	if lang == lsploader.TypeScript {
+	if lsploader.Meta(lang).PreloadFiles {
 		if err := sess.preloadProject(excludes); err != nil {
 			sess.Shutdown()
-			return nil, fmt.Errorf("preload typescript project: %w", err)
+			return nil, fmt.Errorf("preload %s project: %w", lang, err)
 		}
 		if events != nil {
 			go sess.runEventLoop(events, excludes)
@@ -164,9 +165,10 @@ func startLiveSession(
 
 // preloadProject walks root and bulk-opens every source file matching
 // the language's extensions (combined with the user-supplied excludes).
-// Only invoked for TypeScript. tsserver requires this priming before
-// workspace-wide queries return cross-file results, and per-call
-// open/close around BFS would thrash the project state.
+// Only invoked for languages whose meta sets PreloadFiles: their servers
+// (tsserver, pyright) require this priming before workspace-wide queries
+// return cross-file results, and per-call open/close around BFS would
+// thrash the project state.
 func (s *liveSession) preloadProject(excludes []string) error {
 	meta := lsploader.Meta(s.lang)
 	allExcludes := make([]string, 0, len(meta.DefaultExcludes)+len(excludes))

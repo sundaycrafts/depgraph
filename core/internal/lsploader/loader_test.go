@@ -59,6 +59,24 @@ func TestDetect_TypeScript(t *testing.T) {
 	}
 }
 
+func TestDetect_Python(t *testing.T) {
+	markers := []string{"pyproject.toml", "setup.py", "requirements.txt"}
+	for _, marker := range markers {
+		t.Run(marker, func(t *testing.T) {
+			dir := t.TempDir()
+			os.WriteFile(filepath.Join(dir, marker), []byte("\n"), 0644)
+
+			langs, err := lsploader.Detect(dir)
+			if err != nil {
+				t.Fatalf("Detect: %v", err)
+			}
+			if len(langs) != 1 || langs[0] != lsploader.Python {
+				t.Errorf("got %v, want [python]", langs)
+			}
+		})
+	}
+}
+
 func TestDetect_MultiLanguage(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n"), 0644)

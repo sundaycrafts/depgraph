@@ -84,7 +84,7 @@ func (a *Adapter) Analyze(ctx context.Context, root string) (domain.Graph, error
 	}
 	if len(langs) == 0 {
 		return domain.Graph{}, fmt.Errorf(
-			"no supported languages detected in %s (expected go.mod, Cargo.toml, or tsconfig.json)",
+			"no supported languages detected in %s (expected go.mod, Cargo.toml, tsconfig.json, pyproject.toml, setup.py, or requirements.txt)",
 			absRoot,
 		)
 	}
@@ -642,6 +642,8 @@ func langIDForFile(lang lsploader.Language, path string) string {
 			return "typescriptreact"
 		}
 		return "typescript"
+	case lsploader.Python:
+		return "python"
 	default:
 		return ""
 	}

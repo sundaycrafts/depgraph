@@ -115,7 +115,7 @@ func (w *Workspace) AddProject(root string, excludes, excludeSymbols []string) (
 	}
 	if len(langs) == 0 {
 		w.mu.Unlock()
-		return nil, fmt.Errorf("no supported languages detected in %s (expected go.mod, Cargo.toml, or tsconfig.json)", abs)
+		return nil, fmt.Errorf("no supported languages detected in %s (expected go.mod, Cargo.toml, tsconfig.json, pyproject.toml, setup.py, or requirements.txt)", abs)
 	}
 	if err := lsploader.Check(w.locator, langs); err != nil {
 		w.mu.Unlock()

@@ -105,6 +105,35 @@ func TestAnalyze_Rust(t *testing.T) {
 	}
 }
 
+// TestAnalyze_Python verifies that the LSP adapter correctly identifies
+// symbols and references across files in a Python package:
+//   - greeter.py defines greet()
+//   - main.py imports and calls greet() inside main()
+//
+// Expected: graph contains a "greet" symbol and a "references" edge pointing to it.
+func TestAnalyze_Python(t *testing.T) {
+	root, err := filepath.Abs("testdata/python-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	graph, err := lspadapter.New().Analyze(ctx, root)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+
+	greet := findSymbol(graph, "greet")
+	if greet == nil {
+		t.Fatalf("symbol 'greet' not found in graph; symbols present: %v", symbolLabels(graph))
+	}
+	if !hasReferenceTo(graph, greet.ID) {
+		t.Errorf("expected a 'references' edge pointing to 'greet', found none")
+	}
+}
+
 func findSymbol(g domain.Graph, label string) *domain.Node {
 	for i, n := range g.Nodes {
 		if n.Kind == domain.NodeKindSymbol && n.Label == label {

@@ -1,12 +1,13 @@
 import type { Graph } from '../schemas/api'
 
-export type Language = 'go' | 'rust' | 'typescript' | 'default'
+export type Language = 'go' | 'rust' | 'typescript' | 'python' | 'default'
 
 export function detectLanguage(graph: Graph): Language {
   for (const node of graph.nodes) {
     if (node.path?.endsWith('.go')) return 'go'
     if (node.path?.endsWith('.rs')) return 'rust'
     if (node.path?.endsWith('.ts') || node.path?.endsWith('.tsx')) return 'typescript'
+    if (node.path?.endsWith('.py')) return 'python'
   }
   return 'default'
 }
@@ -34,5 +35,6 @@ export const PRESETS: Record<Language, string[]> = {
   go:         ['function', 'interface', 'method'],
   typescript: ['function', 'interface', 'class', 'method', 'constant', 'variable'],
   rust:       ['function', 'interface', 'method'],  // "interface" = trait in rust-analyzer
+  python:     ['function', 'class', 'method'],
   default:    [],                                   // no filter
 }

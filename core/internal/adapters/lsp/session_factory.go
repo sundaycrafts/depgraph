@@ -32,10 +32,10 @@ func NewSessionFactory(cfg *Config, logger *slog.Logger) *SessionFactory {
 // handshake, waits for indexing to settle, and returns a session ready
 // to answer DocumentSymbol / References queries.
 //
-// For TypeScript components the construction also pre-opens every
-// project file (tsserver requires this for cross-file references) and
-// starts a goroutine consuming `events` to keep the LSP's view in sync
-// with disk.
+// For languages whose meta sets PreloadFiles (e.g. TypeScript, Python)
+// the construction also pre-opens every project file (their servers
+// require this for cross-file references) and starts a goroutine
+// consuming `events` to keep the LSP's view in sync with disk.
 func (f *SessionFactory) Open(
 	ctx context.Context,
 	lang lsploader.Language,

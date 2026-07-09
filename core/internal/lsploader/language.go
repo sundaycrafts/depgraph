@@ -7,6 +7,7 @@ const (
 	Go         Language = "go"
 	Rust       Language = "rust"
 	TypeScript Language = "typescript"
+	Python     Language = "python"
 )
 
 // LanguageMeta holds static configuration for a language's LSP toolchain.
@@ -18,10 +19,16 @@ type LanguageMeta struct {
 	InstallHint     string   // shown in error messages when the binary is missing
 	DefaultExcludes []string // doublestar glob patterns excluded from the walk
 	// in addition to user-supplied --exclude flags
+
+	// PreloadFiles marks language servers that only answer document and
+	// cross-file queries for files in their open set (didOpen), so live
+	// sessions must bulk-open every project file up front. gopls and
+	// rust-analyzer answer from disk; tsserver and pyright do not.
+	PreloadFiles bool
 }
 
 // ordered is the canonical iteration order for languages (deterministic output).
-var ordered = []Language{Go, Rust, TypeScript}
+var ordered = []Language{Go, Rust, TypeScript, Python}
 
 var meta = map[Language]LanguageMeta{
 	Go: {
@@ -47,6 +54,16 @@ var meta = map[Language]LanguageMeta{
 		LSPArgs:         []string{"--stdio"},
 		InstallHint:     "npm install -g typescript-language-server typescript",
 		DefaultExcludes: []string{"node_modules/**"},
+		PreloadFiles:    true,
+	},
+	Python: {
+		MarkerFiles:     []string{"pyproject.toml", "setup.py", "requirements.txt"},
+		FileExts:        []string{".py"},
+		LSPBinary:       "pyright-langserver",
+		LSPArgs:         []string{"--stdio"},
+		InstallHint:     "npm install -g pyright",
+		DefaultExcludes: []string{"venv/**", "__pycache__/**"},
+		PreloadFiles:    true,
 	},
 }
 

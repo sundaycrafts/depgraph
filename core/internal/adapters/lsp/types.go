@@ -1,6 +1,9 @@
 package lsp
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // URI is a file:// URI string.
 type URI = string
@@ -42,8 +45,28 @@ type InitializeResult struct {
 
 // ServerCapabilities (only fields used in Phase 1).
 type ServerCapabilities struct {
-	DefinitionProvider bool `json:"definitionProvider"`
-	ReferencesProvider bool `json:"referencesProvider"`
+	DefinitionProvider CapabilityFlag `json:"definitionProvider"`
+	ReferencesProvider CapabilityFlag `json:"referencesProvider"`
+}
+
+// CapabilityFlag decodes a server capability that the LSP spec types as
+// `boolean | <Kind>Options` (e.g. pyright advertises referencesProvider as
+// an options object, while gopls sends a bare bool). A present options
+// object counts as enabled.
+type CapabilityFlag bool
+
+func (c *CapabilityFlag) UnmarshalJSON(data []byte) error {
+	var b bool
+	if err := json.Unmarshal(data, &b); err == nil {
+		*c = CapabilityFlag(b)
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return fmt.Errorf("capability is neither bool nor object: %s", data)
+	}
+	*c = CapabilityFlag(obj != nil)
+	return nil
 }
 
 // TextDocumentIdentifier identifies an open document.
