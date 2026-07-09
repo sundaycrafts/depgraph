@@ -9,16 +9,32 @@ import (
 type URI = string
 
 // InitializeParams is the params for the "initialize" request.
+// WorkspaceFolders is sent alongside rootUri: some servers (e.g. pyright)
+// only anchor absolute-import resolution to folders passed there and treat
+// a bare rootUri as no workspace at all.
 type InitializeParams struct {
-	ProcessID    int              `json:"processId"`
-	RootURI      URI              `json:"rootUri"`
-	Capabilities ClientCapability `json:"capabilities"`
+	ProcessID        int               `json:"processId"`
+	RootURI          URI               `json:"rootUri"`
+	WorkspaceFolders []WorkspaceFolder `json:"workspaceFolders,omitempty"`
+	Capabilities     ClientCapability  `json:"capabilities"`
+}
+
+// WorkspaceFolder names a workspace root passed in initialize.
+type WorkspaceFolder struct {
+	URI  URI    `json:"uri"`
+	Name string `json:"name"`
 }
 
 // ClientCapability is a minimal capability declaration.
 type ClientCapability struct {
 	TextDocument TextDocumentClientCapabilities `json:"textDocument"`
+	Workspace    WorkspaceClientCapabilities    `json:"workspace"`
 	Window       WindowClientCapabilities       `json:"window"`
+}
+
+// WorkspaceClientCapabilities advertises workspace-level client support.
+type WorkspaceClientCapabilities struct {
+	WorkspaceFolders bool `json:"workspaceFolders"`
 }
 
 // TextDocumentClientCapabilities declares document symbol support.

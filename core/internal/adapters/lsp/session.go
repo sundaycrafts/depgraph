@@ -105,9 +105,15 @@ func startLiveSession(
 	}()
 
 	rootURI := fileURI(root)
+	// workspaceFolders accompanies rootUri: some servers (e.g. pyright)
+	// only anchor absolute-import resolution to folders passed there and
+	// treat a bare rootUri as no workspace at all.
 	initParams := map[string]any{
 		"processId": os.Getpid(),
 		"rootUri":   rootURI,
+		"workspaceFolders": []map[string]any{
+			{"uri": rootURI, "name": filepath.Base(root)},
+		},
 		"capabilities": map[string]any{
 			"textDocument": map[string]any{
 				"documentSymbol": map[string]any{
@@ -115,7 +121,8 @@ func startLiveSession(
 				},
 			},
 			"workspace": map[string]any{
-				"symbol": map[string]any{},
+				"symbol":           map[string]any{},
+				"workspaceFolders": true,
 			},
 			"window": map[string]any{
 				"workDoneProgress": true,

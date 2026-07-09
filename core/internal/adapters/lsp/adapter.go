@@ -157,15 +157,17 @@ func (a *Adapter) analyzeWithLSP(ctx context.Context, root string, lang lsploade
 	rootURI := fileURI(root)
 	var initResult InitializeResult
 	if err := c.call(ctx, "initialize", InitializeParams{
-		ProcessID: os.Getpid(),
-		RootURI:   rootURI,
+		ProcessID:        os.Getpid(),
+		RootURI:          rootURI,
+		WorkspaceFolders: []WorkspaceFolder{{URI: rootURI, Name: filepath.Base(root)}},
 		Capabilities: ClientCapability{
 			TextDocument: TextDocumentClientCapabilities{
 				DocumentSymbol: DocumentSymbolClientCapabilities{
 					HierarchicalDocumentSymbolSupport: true,
 				},
 			},
-			Window: WindowClientCapabilities{WorkDoneProgress: true},
+			Workspace: WorkspaceClientCapabilities{WorkspaceFolders: true},
+			Window:    WindowClientCapabilities{WorkDoneProgress: true},
 		},
 	}, &initResult); err != nil {
 		return fmt.Errorf("initialize: %w", err)
